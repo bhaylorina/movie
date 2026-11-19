@@ -86,6 +86,7 @@ def extract_hubcloud_from_gadgets(url):
             hubcloud_url = decrypt_token(token_match.group(1))
             if hubcloud_url:
                 if "hblinks" in hubcloud_url:
+                    print(f"    [🔄] Detected HBLinks page, extracting HubCloud...")
                     hb_resp = session.get(hubcloud_url, timeout=15)
                     hb_soup = BeautifulSoup(hb_resp.text, 'html.parser')
                     for a in hb_soup.find_all('a'):
@@ -112,8 +113,17 @@ def extract_hubcloud_from_hubdrive(url):
         pass
     return None
 
+def convert_pixeldrain_to_direct(url):
+    url = url.replace('pixeldrain.com', 'pixeldrain.dev')
+    if "pixeldrain.dev/u/" in url:
+        file_id = url.split("/u/")[-1].split("?")[0]
+        direct_url = f"https://pixeldrain.dev/api/file/{file_id}?download"
+        return direct_url
+    return url
+
 def process_hubcloud(hubcloud_url):
     try:
+        print(f"    [☁️] Processing HubCloud...")
         resp = session.get(hubcloud_url, timeout=15)
         soup = BeautifulSoup(resp.text, 'html.parser')
         
@@ -132,72 +142,109 @@ def process_hubcloud(hubcloud_url):
         if not gen_url.startswith('http'):
             gen_url = urllib.parse.urljoin(hubcloud_url, gen_url)
             
+        print(f"      [*] Download list page par jaa rahe hain...")
         gen_resp = session.get(gen_url, timeout=15)
         
-        # \u0026 FIX for 400 Error
+        # \u0026 aur &amp; FIX
         html_text = gen_resp.text.replace('&amp;', '&').replace('\\u0026', '&').replace('\u0026', '&')
         gen_soup = BeautifulSoup(html_text, 'html.parser')
         
-        # ============ PRIORITY 1: FSL SERVER (28800) ============
+        # ==========================================
+        # PRIORITY 1: FSL SERVER (28800)
+        # ==========================================
         for a in gen_soup.find_all('a'):
             text = a.get_text(strip=True).lower()
             href = a.get('href', '')
-            
             if 'fsl server' in text and 'fslv2' not in text:
                 if href and 'http' in href:
+                    print(f"      [✅] FSL Server Link mila (Direct Button)!")
                     return href
         
         # Fallback Regex for FSL
         all_r2_links = re.findall(r'https?://[a-zA-Z0-9._-]+\.r2\.cloudflarestorage\.com/[^\s"\'<>]+', html_text)
-        valid_links = [l for l in all_r2_links if 't3apac' not in l.lower() and 'fslv2' not in l.lower()]
+        valid_r2_links = [l for l in all_r2_links if 't3apac' not in l.lower() and 'fslv2' not in l.lower()]
         
-        if valid_links:
-            for link in valid_links:
+        if valid_r2_links:
+            for link in valid_r2_links:
                 if 'X-Amz-Expires=28800' in link:
+                    print(f"      [✅] FSL Server Link mila (Regex 28800)!")
                     return link
-            return valid_links[0]
-            
-        # ============ PRIORITY 2: PIXELSERVER FALLBACK ============
-        print(f"      [!] FSL nahi mila, PixelServer dhundh rahe hain...")
-        pixel_href = None
-        for a in gen_soup.find_all('a'):
-            text = a.get_text(strip=True).lower()
-            href = a.get('href', '')
-            
-            if 'pixelserver' in text and '2' in text:
-                if href and ('pixeldrain' in href or 'pixeldrain' in text):
-                    pixel_href = href
-                    break
-                    
-        # Agar data attribute ya onclick mein ho
-        if not pixel_href:
-            for a in gen_soup.find_all('a'):
-                text = a.get_text(strip=True).lower()
-                if 'pixelserver' in text and '2' in text:
-                    onclick = a.get('onclick', '')
-                    match = re.search(r"location\.href\s*=\s*['\"]([^'\"]+)['\"]", onclick)
-                    if match: 
-                        pixel_href = match.group(1)
-                        break
+            print(f"      [⚠️] FSL Server Link mila (Regex Fallback)!")
+            return valid_r2_links[0]
 
-        if pixel_href:
-            # Convert Pixeldrain to Direct API
-            pixel_href = pixel_href.replace('pixeldrain.com', 'pixeldrain.dev')
-            if "/u/" in pixel_href:
-                file_id = pixel_href.split("/u/")[-1].split("?")[0]
-                direct_url = f"https://pixeldrain.dev/api/file/{file_id}?download"
-                print(f"      [✅] PixelServer (Fallback) mila aur Direct API me convert ho gaya!")
-                return direct_url
-            elif "/api/file/" in pixel_href:
-                return pixel_href
+        # ==========================================
+        # PRIORITY 2: PIXELSERVER (Deep Search Fallback)
+        # ==========================================
+        print(f"      [!] FSL nahi mila, PixelServer ke liye Deep Search shuru...")
+        found_links = set()
+        
+        # 1. Direct links in HTML
+        for match in re.finditer(r'pixeldrain\.(?:dev|com)/u/([a-zA-Z0-9]+)', html_text):
+            found_links.add(match.group(1))
             
-        # Agar dono fail ho jayein
-        print("      [❌] FSL aur PixelServer dono nahi mile.")
+        # 2. Data attributes on buttons
+        for a in gen_soup.find_all('a'):
+            for attr in ['data-url', 'data-link', 'data-href', 'data-src']:
+                val = a.get(attr)
+                if val:
+                    for m in re.finditer(r'pixeldrain\.(?:dev|com)/u/([a-zA-Z0-9]+)', val):
+                        found_links.add(m.group(1))
+                        
+        # 3. Base64 encoded strings in JS
+        for match in re.finditer(r'[a-zA-Z0-9+/]{20,}={0,2}', html_text):
+            b64_str = match.group(0)
+            try:
+                decoded = base64.b64decode(b64_str + "=" * ((4 - len(b64_str) % 4) % 4)).decode('utf-8')
+                for m in re.finditer(r'pixeldrain\.(?:dev|com)/u/([a-zA-Z0-9]+)', decoded):
+                    found_links.add(m.group(1))
+            except: pass
+            
+        # 4. atob('...') patterns in JS
+        for match in re.finditer(r"atob\(['\"]([^'\"]+)['\"]\)", html_text):
+            b64_str = match.group(1)
+            try:
+                decoded = base64.b64decode(b64_str + "=" * ((4 - len(b64_str) % 4) % 4)).decode('utf-8')
+                for m in re.finditer(r'pixeldrain\.(?:dev|com)/u/([a-zA-Z0-9]+)', decoded):
+                    found_links.add(m.group(1))
+            except: pass
+            
+        # 5. URL parameters
+        parsed_url = urllib.parse.urlparse(gen_url)
+        query_params = urllib.parse.parse_qs(parsed_url.query)
+        for key, values in query_params.items():
+            for val in values:
+                try:
+                    decoded = base64.b64decode(val + "=" * ((4 - len(val) % 4) % 4)).decode('utf-8')
+                    for m in re.finditer(r'pixeldrain\.(?:dev|com)/u/([a-zA-Z0-9]+)', decoded):
+                        found_links.add(m.group(1))
+                except: pass
+                for m in re.finditer(r'pixeldrain\.(?:dev|com)/u/([a-zA-Z0-9]+)', val):
+                    found_links.add(m.group(1))
+
+        # Filter out dummy link 'negn6f' (Jaal)
+        real_ids = [id for id in found_links if id != 'negn6f']
+        
+        target_url = None
+        if real_ids:
+            target_url = f"https://pixeldrain.dev/u/{real_ids[0]}"
+            print(f"      [✅] Real Pixel Link mila (Deep Search): {target_url}")
+        elif found_links:
+            target_url = f"https://pixeldrain.dev/u/{list(found_links)[0]}"
+            print(f"      [⚠️] Sirf placeholder link mila: {target_url}")
+        else:
+            print("      [❌] Page par koi bhi asli PixelDrain link nahi mila.")
+            return None
+
+        if target_url:
+            final_direct_pixel = convert_pixeldrain_to_direct(target_url)
+            print(f"      [🔄] Pixel Link Direct API me convert ho gaya: {final_direct_pixel}")
+            return final_direct_pixel
+
         return None
-            
+                
     except Exception as e:
-        print(f"HubCloud Error: {e}")
-        return None
+        print(f"    [❌] HubCloud Error: {e}")
+    return None
 
 # ================= FLASK ROUTES =================
 
@@ -225,7 +272,6 @@ def get_playlist():
         for page in range(1, 10):
             try:
                 url = f"{BASE_URL}/category/{cat_url}/page/{page}/"
-                print(f"[*] Fetching: {url}")
                 resp = session.get(url, timeout=15)
                 
                 if resp.status_code != 200:
