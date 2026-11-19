@@ -171,7 +171,7 @@ def home():
 def get_playlist():
     global cache_data
     # 1 hour cache
-    if cache_data["m3u"] and (time.time() - cache_data["timestamp"] < 3600):
+    if cache_data["m3u"] and (time.time() - cache_data["timestamp"] < 0):
         return Response(cache_data["m3u"], mimetype='audio/x-mpegurl')
 
     categories = [
@@ -185,7 +185,7 @@ def get_playlist():
     
     for cat_url, cat_name in categories:
         # Fetch first 2 pages of each category
-        for page in range(1, 3):
+        for page in range(1, 6):
             try:
                 url = f"{BASE_URL}/category/{cat_url}/page/{page}/"
                 print(f"[*] Fetching: {url}") # Debug log
