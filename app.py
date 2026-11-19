@@ -138,7 +138,7 @@ def process_hubcloud(hubcloud_url):
         html_text = gen_resp.text.replace('&amp;', '&').replace('\\u0026', '&').replace('\u0026', '&')
         gen_soup = BeautifulSoup(html_text, 'html.parser')
         
-        # FSL SERVER (28800) LOGIC
+        # ============ PRIORITY 1: FSL SERVER (28800) ============
         for a in gen_soup.find_all('a'):
             text = a.get_text(strip=True).lower()
             href = a.get('href', '')
@@ -147,7 +147,7 @@ def process_hubcloud(hubcloud_url):
                 if href and 'http' in href:
                     return href
         
-        # Fallback Regex
+        # Fallback Regex for FSL
         all_r2_links = re.findall(r'https?://[a-zA-Z0-9._-]+\.r2\.cloudflarestorage\.com/[^\s"\'<>]+', html_text)
         valid_links = [l for l in all_r2_links if 't3apac' not in l.lower() and 'fslv2' not in l.lower()]
         
@@ -157,9 +157,47 @@ def process_hubcloud(hubcloud_url):
                     return link
             return valid_links[0]
             
-    except Exception:
-        pass
-    return None
+        # ============ PRIORITY 2: PIXELSERVER FALLBACK ============
+        print(f"      [!] FSL nahi mila, PixelServer dhundh rahe hain...")
+        pixel_href = None
+        for a in gen_soup.find_all('a'):
+            text = a.get_text(strip=True).lower()
+            href = a.get('href', '')
+            
+            if 'pixelserver' in text and '2' in text:
+                if href and ('pixeldrain' in href or 'pixeldrain' in text):
+                    pixel_href = href
+                    break
+                    
+        # Agar data attribute ya onclick mein ho
+        if not pixel_href:
+            for a in gen_soup.find_all('a'):
+                text = a.get_text(strip=True).lower()
+                if 'pixelserver' in text and '2' in text:
+                    onclick = a.get('onclick', '')
+                    match = re.search(r"location\.href\s*=\s*['\"]([^'\"]+)['\"]", onclick)
+                    if match: 
+                        pixel_href = match.group(1)
+                        break
+
+        if pixel_href:
+            # Convert Pixeldrain to Direct API
+            pixel_href = pixel_href.replace('pixeldrain.com', 'pixeldrain.dev')
+            if "/u/" in pixel_href:
+                file_id = pixel_href.split("/u/")[-1].split("?")[0]
+                direct_url = f"https://pixeldrain.dev/api/file/{file_id}?download"
+                print(f"      [✅] PixelServer (Fallback) mila aur Direct API me convert ho gaya!")
+                return direct_url
+            elif "/api/file/" in pixel_href:
+                return pixel_href
+            
+        # Agar dono fail ho jayein
+        print("      [❌] FSL aur PixelServer dono nahi mile.")
+        return None
+            
+    except Exception as e:
+        print(f"HubCloud Error: {e}")
+        return None
 
 # ================= FLASK ROUTES =================
 
@@ -184,38 +222,34 @@ def get_playlist():
     total_movies = 0
     
     for cat_url, cat_name in categories:
-        # Fetch first 2 pages of each category
         for page in range(1, 10):
             try:
                 url = f"{BASE_URL}/category/{cat_url}/page/{page}/"
-                print(f"[*] Fetching: {url}") # Debug log
+                print(f"[*] Fetching: {url}")
                 resp = session.get(url, timeout=15)
                 
                 if resp.status_code != 200:
-                    print(f"[!] Failed to load {url}, Status: {resp.status_code}")
                     continue
                     
                 soup = BeautifulSoup(resp.text, 'html.parser')
                 
-                # 🛑 FIX: Direct <a> tags par loop chalayenge
                 for a_tag in soup.find_all('a', href=True):
                     title = a_tag.get_text(strip=True)
                     href = a_tag['href']
                     
-                    # 1. Basic Filter (Title chota nahi hona chahiye, 2026 hona chahiye)
-                    if not title or len(title) < 15: 
-                        continue
-                    if "(2026)" not in title: 
+                    if not title or len(title) < 10: 
                         continue
                         
-                    # 2. URL Filter (Sirf hdhub4u ki links leni hain)
+                    # 🛑 2026 aur 2025 dono allow hain
+                    if "(2026)" not in title and "(2025)" not in title: 
+                        continue
+                        
                     if not href.startswith('http'):
                         href = BASE_URL + href
                     
                     if BASE_URL not in href:
                         continue
                         
-                    # 3. Garbage Filter (Category page, pagination ya play button ko block karo)
                     if '/category/' in href or '/page/' in href or 'how-to-download' in href:
                         continue
                         
@@ -223,7 +257,6 @@ def get_playlist():
                     if any(kw in title.lower() for kw in exclude): 
                         continue
                     
-                    # 4. Duplicate Filter
                     if href in seen_urls:
                         continue
                     
@@ -244,6 +277,7 @@ def get_playlist():
     cache_data["timestamp"] = time.time()
     
     return Response(m3u, mimetype='audio/x-mpegurl')
+
 @app.route('/play')
 def play_movie():
     encoded_url = request.args.get('url')
@@ -251,12 +285,10 @@ def play_movie():
         return "No URL provided", 400
 
     try:
-        # Decode the URL
         movie_url = base64.urlsafe_b64decode(encoded_url.encode()).decode()
     except Exception:
         return "Invalid URL encoding", 400
 
-    # Now run the real extraction
     try:
         movie_resp = session.get(movie_url, timeout=15)
         movie_soup = BeautifulSoup(movie_resp.text, 'html.parser')
@@ -276,7 +308,6 @@ def play_movie():
         if hubcloud:
             final_link = process_hubcloud(hubcloud)
             if final_link:
-                # Redirect player to the final FSL link
                 return redirect(final_link, code=302)
                 
         return "Failed to extract final HubCloud link.", 500
