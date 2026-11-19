@@ -180,6 +180,7 @@ def get_playlist():
     ]
     
     m3u = "#EXTM3U\n"
+    seen_urls = set() # 🛑 Fix: Duplicate links ko rokne ke liye set
     
     for cat_url, cat_name in categories:
         # Fetch first 2 pages of each category
@@ -189,17 +190,37 @@ def get_playlist():
                 resp = session.get(url, timeout=15)
                 soup = BeautifulSoup(resp.text, 'html.parser')
                 
-                for tag in soup.find_all(['h2', 'h3', 'a']):
-                    title = tag.get_text(strip=True)
-                    href = tag.get('href')
+                # 🛑 Fix: Sirf h2/h3 tags dhundho jisme actual movie titles hote hain
+                for h_tag in soup.find_all(['h2', 'h3']):
+                    title = h_tag.get_text(strip=True)
                     
-                    if not href or "(2026)" not in title: continue
+                    # Title ke andar wala <a> tag nikaalo
+                    a_tag = h_tag.find('a')
+                    if not a_tag:
+                        continue
+                        
+                    href = a_tag.get('href')
                     
-                    exclude = ["season", "ep-", "episode", "series", "s01", "s02", "how to download"]
-                    if any(kw in title.lower() for kw in exclude): continue
+                    # Basic Filters
+                    if not href or "(2026)" not in title: 
+                        continue
+                    
+                    # 🛑 Fix: Ghatiya aur random links ko block karo (jaise 'play' button)
+                    if title.lower().strip() == 'play' or len(title) < 10:
+                        continue
+                    
+                    exclude = ["season", "ep-", "episode", "series", "s01", "s02", "how to download", "telegram"]
+                    if any(kw in title.lower() for kw in exclude): 
+                        continue
                     
                     if not href.startswith('http'):
                         href = BASE_URL + href
+                    
+                    # 🛑 Fix: Agar ye link pehle add ho chuka hai toh skip karo
+                    if href in seen_urls:
+                        continue
+                    
+                    seen_urls.add(href)
                     
                     # Encode the URL safely
                     encoded_url = base64.urlsafe_b64encode(href.encode()).decode()
