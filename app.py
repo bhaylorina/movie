@@ -180,63 +180,70 @@ def get_playlist():
     ]
     
     m3u = "#EXTM3U\n"
-    seen_urls = set() # 🛑 Fix: Duplicate links ko rokne ke liye set
+    seen_urls = set() 
+    total_movies = 0
     
     for cat_url, cat_name in categories:
         # Fetch first 2 pages of each category
         for page in range(1, 3):
             try:
                 url = f"{BASE_URL}/category/{cat_url}/page/{page}/"
+                print(f"[*] Fetching: {url}") # Debug log
                 resp = session.get(url, timeout=15)
+                
+                if resp.status_code != 200:
+                    print(f"[!] Failed to load {url}, Status: {resp.status_code}")
+                    continue
+                    
                 soup = BeautifulSoup(resp.text, 'html.parser')
                 
-                # 🛑 Fix: Sirf h2/h3 tags dhundho jisme actual movie titles hote hain
-                for h_tag in soup.find_all(['h2', 'h3']):
-                    title = h_tag.get_text(strip=True)
+                # 🛑 FIX: Direct <a> tags par loop chalayenge
+                for a_tag in soup.find_all('a', href=True):
+                    title = a_tag.get_text(strip=True)
+                    href = a_tag['href']
                     
-                    # Title ke andar wala <a> tag nikaalo
-                    a_tag = h_tag.find('a')
-                    if not a_tag:
+                    # 1. Basic Filter (Title chota nahi hona chahiye, 2026 hona chahiye)
+                    if not title or len(title) < 15: 
+                        continue
+                    if "(2026)" not in title: 
                         continue
                         
-                    href = a_tag.get('href')
-                    
-                    # Basic Filters
-                    if not href or "(2026)" not in title: 
-                        continue
-                    
-                    # 🛑 Fix: Ghatiya aur random links ko block karo (jaise 'play' button)
-                    if title.lower().strip() == 'play' or len(title) < 10:
-                        continue
-                    
-                    exclude = ["season", "ep-", "episode", "series", "s01", "s02", "how to download", "telegram"]
-                    if any(kw in title.lower() for kw in exclude): 
-                        continue
-                    
+                    # 2. URL Filter (Sirf hdhub4u ki links leni hain)
                     if not href.startswith('http'):
                         href = BASE_URL + href
                     
-                    # 🛑 Fix: Agar ye link pehle add ho chuka hai toh skip karo
+                    if BASE_URL not in href:
+                        continue
+                        
+                    # 3. Garbage Filter (Category page, pagination ya play button ko block karo)
+                    if '/category/' in href or '/page/' in href or 'how-to-download' in href:
+                        continue
+                        
+                    exclude = ["season", "ep-", "episode", "series", "s01", "s02", "how to download", "telegram", "play"]
+                    if any(kw in title.lower() for kw in exclude): 
+                        continue
+                    
+                    # 4. Duplicate Filter
                     if href in seen_urls:
                         continue
                     
                     seen_urls.add(href)
+                    total_movies += 1
                     
-                    # Encode the URL safely
                     encoded_url = base64.urlsafe_b64encode(href.encode()).decode()
                     
-                    # Add to M3U
                     m3u += f'#EXTINF:-1 group-title="{cat_name}",{title}\n'
                     m3u += f'https://{request.host}/play?url={encoded_url}\n'
                     
             except Exception as e:
-                print(f"Error fetching {cat_name} page {page}: {e}")
+                print(f"[!] Error fetching {cat_name} page {page}: {e}")
 
+    print(f"[+] Total movies added to playlist: {total_movies}")
+    
     cache_data["m3u"] = m3u
     cache_data["timestamp"] = time.time()
     
     return Response(m3u, mimetype='audio/x-mpegurl')
-
 @app.route('/play')
 def play_movie():
     encoded_url = request.args.get('url')
