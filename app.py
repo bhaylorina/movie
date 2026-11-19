@@ -185,7 +185,7 @@ def get_playlist():
     
     for cat_url, cat_name in categories:
         # Fetch first 2 pages of each category
-        for page in range(1, 6):
+        for page in range(1, 10):
             try:
                 url = f"{BASE_URL}/category/{cat_url}/page/{page}/"
                 print(f"[*] Fetching: {url}") # Debug log
