@@ -407,7 +407,6 @@ def fix_movie_url(url):
 
     return url
 
-
 def normalize_search_url(permalink):
     permalink = html_lib.unescape(str(permalink or "")).strip()
 
