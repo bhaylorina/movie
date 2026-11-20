@@ -5,7 +5,7 @@ import base64
 import urllib.parse
 import datetime
 from urllib.parse import urlparse
-import requests as std_requests  # API Search ke liye normal requests
+import requests as std_requests  # Search API ke liye normal requests
 from bs4 import BeautifulSoup
 from curl_cffi import requests
 from flask import Flask, request, redirect, Response, render_template_string
@@ -14,7 +14,7 @@ app = Flask(__name__)
 
 BASE_URL = "https://new15.hdhub4u.cl"
 
-# curl_cffi session (Aapke base script se bilkul same)
+# === AAPKA ORIGINAL CURL_CFFI SESSION (No changes) ===
 session = requests.Session(impersonate="chrome110")
 session.headers.update({
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36',
@@ -22,11 +22,10 @@ session.headers.update({
     'Accept-Language': 'en-US,en;q=0.5',
 })
 
-# Simple In-Memory Cache
 cache_data = {"m3u": None, "timestamp": 0}
 saved_movies = {}
 
-# === AAPKE ORIGINAL FUNCTIONS (No changes) ===
+# === AAPKE ORIGINAL EXTRACTION FUNCTIONS (No changes) ===
 def rot13(s):
     res = []
     for char in s:
@@ -241,7 +240,7 @@ def process_hubcloud(hubcloud_url):
     return None
 
 
-# ================= SEARCH & WEB UI =================
+# ================= WEB UI & SEARCH =================
 
 @app.route('/')
 def home():
@@ -299,10 +298,12 @@ def search():
     results = []
     seen = set()
     
-    # --- 1. Typesense API (Normal requests use kiya taaki curl_cffi block na kare) ---
+    # 100% API Search (Koi website scraping nahi)
     try:
         today = datetime.date.today().isoformat()
         api_url = "https://search.pingora.fyi/collections/post/documents/search"
+        
+        # Exact parameters jo site ke JS me use hote hain
         params = {
             'q': query,
             'query_by': 'post_title,category,stars,director,imdb_id',
@@ -314,13 +315,17 @@ def search():
             'page': 1,
             'analytics_tag': today
         }
+        
+        # Cloudflare se bachne ke liye normal requests use kar rahe hain
         resp = std_requests.get(api_url, params=params, timeout=15)
+        
         if resp.status_code == 200:
             data = resp.json()
             for hit in data.get('hits', []):
                 doc = hit.get('document', {})
                 title = doc.get('post_title', '')
                 permalink = doc.get('permalink', '')
+                
                 if not title or not permalink: 
                     continue
                 
@@ -334,28 +339,9 @@ def search():
                 seen.add(path)
                 results.append({'title': title, 'url': path})
     except Exception as e:
-        print(f"Typesense API Error: {e}")
+        print(f"API Search Error: {e}")
 
-    # --- 2. WordPress Native Search API ---
-    if len(results) < 5: 
-        try:
-            wp_url = f"{BASE_URL}/wp-json/wp/v2/search"
-            wp_params = {'search': query, 'per_page': 50}
-            wp_resp = std_requests.get(wp_url, params=wp_params, timeout=15)
-            if wp_resp.status_code == 200:
-                for item in wp_resp.json():
-                    title = item.get('title', '')
-                    url = item.get('url', '')
-                    if not title or not url: 
-                        continue
-                    if url in seen: 
-                        continue
-                    seen.add(url)
-                    results.append({'title': title, 'url': url})
-        except Exception as e:
-            print(f"WP API Error: {e}")
-
-    # Generate HTML
+    # Generate Results HTML
     results_html = ""
     for movie in results:
         enc_url = base64.urlsafe_b64encode(movie['url'].encode()).decode()
@@ -418,13 +404,11 @@ def remove(title):
         del saved_movies[title]
     return redirect('/')
 
-
-# ================= M3U & PLAY =================
+# ================= ORIGINAL PLAYLIST & PLAY (No changes) =================
 
 @app.route('/playlist.m3u')
 def get_playlist():
     global cache_data
-    # Base logic
     if cache_data["m3u"] and (time.time() - cache_data["timestamp"] < 0):
         base_m3u = cache_data["m3u"]
     else:
@@ -490,7 +474,7 @@ def get_playlist():
         cache_data["m3u"] = base_m3u
         cache_data["timestamp"] = time.time()
 
-    # Saved Movies ko M3U me add karna (Bina koi extra folder banaye)
+    # Saved Movies ko append karna (Bina structure bigaade)
     final_m3u = base_m3u
     safe_saved = {}
     now = time.time()
