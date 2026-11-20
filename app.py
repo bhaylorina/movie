@@ -1,928 +1,518 @@
-import os
 import re
 import time
+import json
 import base64
-import codecs
+import urllib.parse
 import html as html_lib
-from datetime import date
-from urllib.parse import urljoin, urlsplit, quote, unquote, urlencode
-
-from flask import Flask, request, redirect
+from urllib.parse import quote, unquote
 from bs4 import BeautifulSoup
-from curl_cffi import requests as cffi_requests
-import requests as std_requests
+from curl_cffi import requests
+from flask import Flask, request, redirect, Response
 
 app = Flask(__name__)
 
 BASE_URL = "https://new15.hdhub4u.cl"
 
-UA = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/120.0.0.0 Safari/537.36"
-)
+# curl_cffi session
+session = requests.Session(impersonate="chrome110")
+session.headers.update({
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+    'Accept-Language': 'en-US,en;q=0.5',
+})
 
-SITE_HEADERS = {
-    "User-Agent": UA,
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.9",
-    "Origin": BASE_URL,
-    "Referer": BASE_URL + "/",
-}
+# Simple In-Memory Cache
+cache_data = {"m3u": None, "timestamp": 0}
 
-API_HEADERS = {
-    "User-Agent": UA,
-    "Accept": "application/json, text/plain, */*",
-    "Accept-Language": "en-US,en;q=0.9",
-    "Origin": BASE_URL,
-    "Referer": BASE_URL + "/",
-}
-
-# Site scraping / playback ke liye curl_cffi
-site_session = cffi_requests.Session(impersonate="chrome110")
-site_session.headers.update(SITE_HEADERS)
-
-# Search API ke liye normal requests
-api_session = std_requests.Session()
-api_session.headers.update(API_HEADERS)
-
-# Site pages fallback ke liye normal requests
-std_site_session = std_requests.Session()
-std_site_session.headers.update(SITE_HEADERS)
-
-main_cache = {
-    "data": [],
-    "last_update": 0
-}
-CACHE_DURATION = 0  # 1 hour
-
+# 🛑 नया: Saved Movies के लिए डिक्शनरी
 saved_movies = {}
-SAVED_DURATION = 3 * 24 * 60 * 60  # 3 days
+SAVED_DURATION = 3 * 24 * 60 * 60  # 3 दिन का टाइमर
 
-
-def trim_url(url):
-    if not url:
-        return ""
-    url = url.strip().strip('"\'')
-    return url.rstrip('.,);]}')
-
-
-def clean_url(url):
-    url = (url or "").strip()
-    if url.startswith("//"):
-        return "https:" + url
-    if url.startswith("/"):
-        return BASE_URL + url
-    return url
-
-
-def normalize_html(text):
-    if not text:
-        return ""
-    return (
-        text.replace("&amp;", "&")
-        .replace("\\u0026", "&")
-        .replace("\u0026", "&")
-        .replace("\\/", "/")
-        .replace("&quot;", '"')
-        .replace("&#39;", "'")
-    )
-
-
-def rot13(text):
-    return codecs.decode(text, "rot_13")
-
+def rot13(s):
+    res = []
+    for char in s:
+        if 'a' <= char <= 'z':
+            res.append(chr((ord(char) - ord('a') + 13) % 26 + ord('a')))
+        elif 'A' <= char <= 'Z':
+            res.append(chr((ord(char) - ord('A') + 13) % 26 + ord('A')))
+        else:
+            res.append(char)
+    return "".join(res)
 
 def decrypt_token(token):
-    if not token:
-        return ""
-    token = unquote(str(token))
-    padded = token + "=" * (-len(token) % 4)
-    for decoder in (base64.urlsafe_b64decode, base64.b64decode):
-        try:
-            decoded = decoder(padded.encode("ascii")).decode("utf-8", errors="ignore")
-            if decoded:
-                return decoded
-        except Exception:
-            pass
-    return token
-
-
-def encode_token(url):
-    return base64.urlsafe_b64encode(url.encode("utf-8")).decode("ascii").rstrip("=")
-
-
-def decode_token(token):
-    if not token:
-        return ""
-
-    token = unquote(str(token))
-
-    if token.startswith("http://") or token.startswith("https://"):
-        return token
-
-    padded = token + "=" * (-len(token) % 4)
-
     try:
-        decoded = base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8")
-        if decoded.startswith("http://") or decoded.startswith("https://"):
-            return decoded
+        s1 = base64.b64decode(token).decode('utf-8')
+        s2 = base64.b64decode(s1).decode('utf-8')
+        s3 = rot13(s2)
+        padded = s3 + "=" * ((4 - len(s3) % 4) % 4)
+        s4 = base64.b64decode(padded).decode('utf-8')
+        data = json.loads(s4)
+        hubcloud_b64 = data.get('o')
+        if hubcloud_b64:
+            return base64.b64decode(hubcloud_b64).decode('utf-8')
     except Exception:
         pass
-
-    return token
-
-
-def convert_pixeldrain_to_direct(url):
-    if not url:
-        return None
-
-    url = normalize_html(url)
-    url = trim_url(url)
-
-    if "pixeldrain" not in url.lower():
-        return None
-
-    if "negn6f" in url.lower():
-        return None
-
-    if "/api/file/" in url:
-        if "download" not in url:
-            return url + ("&" if "?" in url else "?") + "download"
-        return url
-
-    parts = url.rstrip("/").split("/")
-    pix_id = parts[-1].split("?")[0]
-
-    if not pix_id or pix_id in ("api", "file", "u", "d"):
-        return None
-
-    return f"https://pixeldrain.dev/api/file/{pix_id}?download"
-
-
-def extract_links(html_text):
-    if not html_text:
-        return None, None
-
-    text = normalize_html(html_text)
-
-    # 1. FSL 28800 preferred
-    for match in re.findall(r'https://[^\s"\'<>]+', text):
-        url = trim_url(match)
-        low = url.lower()
-
-        if "r2.cloudflarestorage.com" in low and "28800" in url:
-            if "t3apac" not in low and "fslv2" not in low and "negn6f" not in low:
-                return url, None
-
-    # 2. PixelDrain fallback
-    for match in re.findall(r'https://pixeldrain\.(?:dev|com)/[^\s"\'<>]+', text):
-        pix = convert_pixeldrain_to_direct(match)
-        if pix:
-            return None, pix
-
-    # 3. Base64 encoded links
-    for b64 in re.findall(r'[A-Za-z0-9+/=_-]{40,}', text):
-        padded = b64 + "=" * (-len(b64) % 4)
-
-        for decoder in (base64.b64decode, base64.urlsafe_b64decode):
-            try:
-                decoded = decoder(padded).decode("utf-8", errors="ignore")
-            except Exception:
-                continue
-
-            if not decoded:
-                continue
-
-            decoded = normalize_html(decoded)
-
-            for match in re.findall(r'https://[^\s"\'<>]+', decoded):
-                url = trim_url(match)
-                low = url.lower()
-
-                if "r2.cloudflarestorage.com" in low and "28800" in url:
-                    if "t3apac" not in low and "fslv2" not in low and "negn6f" not in low:
-                        return url, None
-
-            for match in re.findall(r'https://pixeldrain\.(?:dev|com)/[^\s"\'<>]+', decoded):
-                pix = convert_pixeldrain_to_direct(match)
-                if pix:
-                    return None, pix
-
-    return None, None
-
-
-def parse_movie_tag(a_tag):
-    title = a_tag.get_text(" ", strip=True)
-    if not title:
-        title = (a_tag.get("title") or "").strip()
-
-    href = (a_tag.get("href") or "").strip()
-
-    if not href or not title or len(title) < 3:
-        return None
-
-    href = clean_url(href)
-    low_title = re.sub(r"\s+", " ", title.lower()).strip()
-    low_href = href.lower()
-
-    garbage_exact = {
-        "play",
-        "home",
-        "homepage",
-        "go to homepage 🏠",
-        "back to home",
-        "next",
-        "previous",
-        "join telegram",
-        "contact us",
-        "dmca",
-        "privacy policy",
-        "about us",
-        "menu",
-    }
-
-    if low_title in garbage_exact:
-        return None
-
-    garbage_contains = [
-        "how to download",
-        "telegram",
-        "episode",
-        "season",
-        "s01",
-        "s02",
-        "series",
-    ]
-
-    if any(k in low_title for k in garbage_contains):
-        return None
-
-    bad_href = [
-        "/category/",
-        "/search",
-        "how-to-download",
-        "/play/",
-        "/page/",
-        "/tag/",
-        "/author/",
-        "wp-login",
-        "#",
-    ]
-
-    if any(k in low_href for k in bad_href):
-        return None
-
-    if href.rstrip("/") == BASE_URL.rstrip("/"):
-        return None
-
-    if not href.startswith(BASE_URL):
-        return None
-
-    return {
-        "title": title,
-        "url": href,
-        "id": encode_token(href),
-    }
-
-
-def fetch_latest_movies():
-    now = time.time()
-
-    if main_cache["data"] and (now - main_cache["last_update"] < CACHE_DURATION):
-        return main_cache["data"]
-
-    print("Refreshing movie cache...")
-
-    movies = []
-    seen = set()
-    categories = ["bollywood-movies", "south-hindi-movies"]
-
-    for cat in categories:
-        for page in range(1, 10):
-            if page == 1:
-                url = f"{BASE_URL}/category/{cat}/"
-            else:
-                url = f"{BASE_URL}/category/{cat}/page/{page}/"
-
-            try:
-                resp = site_session.get(url, timeout=15)
-
-                if resp.status_code == 404:
-                    break
-
-                if resp.status_code != 200:
-                    print(f"Category fetch failed: {url} -> {resp.status_code}")
-                    continue
-
-                soup = BeautifulSoup(resp.text, "html.parser")
-                found_on_page = 0
-
-                for a_tag in soup.find_all("a", href=True):
-                    movie = parse_movie_tag(a_tag)
-                    if not movie:
-                        continue
-
-                    if movie["url"] in seen:
-                        continue
-
-                    seen.add(movie["url"])
-                    movie["category"] = cat
-                    movies.append(movie)
-                    found_on_page += 1
-
-                print(f"{url} -> {found_on_page} movies")
-
-            except Exception as e:
-                print(f"Error fetching {url}: {e}")
-                continue
-
-    if movies:
-        main_cache["data"] = movies
-        main_cache["last_update"] = now
-        print(f"Cache refreshed with {len(movies)} movies.")
-
-    return main_cache["data"]
-
-
-def is_garbage_title(title):
-    low = re.sub(r"\s+", " ", (title or "").lower()).strip()
-
-    if len(low) < 2:
-        return True
-
-    exact = {
-        "play",
-        "home",
-        "homepage",
-        "go to homepage 🏠",
-        "back to home",
-        "next",
-        "previous",
-        "contact us",
-        "dmca",
-        "privacy policy",
-        "about us",
-        "menu",
-    }
-
-    if low in exact:
-        return True
-
-    if "how to download" in low or "telegram" in low:
-        return True
-
-    return False
-
-
-def fix_movie_url(url):
-    """Kisi bhi hdhub4u mirror domain ko current BASE_URL par le aao."""
-    if not url:
-        return ""
-
-    url = url.strip()
-    base = urlsplit(BASE_URL)
-
-    if url.startswith("//"):
-        url = "https:" + url
-
-    # Agar relative path hai (e.g. /movie-name/)
-    if not url.startswith("http://") and not url.startswith("https://"):
-        if url.startswith("/"):
-            return f"{base.scheme}://{base.netloc}{url}"
-        return f"{base.scheme}://{base.netloc}/{url}"
-
-    try:
-        parsed = urlsplit(url)
-    except Exception:
-        return url
-
-    host = (parsed.netloc or "").lower()
-
-    # Agar URL kisi bhi hdhub4u mirror ka hai, toh use BASE_URL se replace karo
-    if "hdhub4u" in host or "hdhub" in host:
-        path = parsed.path or "/"
-        query = f"?{parsed.query}" if parsed.query else ""
-        return f"{base.scheme}://{base.netloc}{path}{query}"
-
-    return url
-
-def normalize_search_url(permalink):
-    permalink = html_lib.unescape(str(permalink or "")).strip()
-
-    if not permalink:
-        return ""
-
-    if permalink.startswith("//"):
-        permalink = "https:" + permalink
-
-    if not permalink.startswith("http://") and not permalink.startswith("https://"):
-        permalink = BASE_URL + (permalink if permalink.startswith("/") else "/" + permalink)
-
-    return fix_movie_url(permalink)
-
-
-def parse_typesense_hits(hits):
-    results = []
-    seen = set()
-
-    for hit in hits:
-        doc = hit.get("document") or {}
-
-        title = html_lib.unescape(str(doc.get("post_title") or "")).strip()
-        permalink = doc.get("permalink") or ""
-
-        if not title or not permalink:
-            continue
-
-        if is_garbage_title(title):
-            continue
-
-        url = normalize_search_url(permalink)
-
-        if not url or url in seen:
-            continue
-
-        seen.add(url)
-
-        results.append({
-            "title": title,
-            "url": url,
-            "id": encode_token(url),
-        })
-
-    return results
-
-
-def typesense_search(query):
-    today = date.today().isoformat()
-    api_url = "https://search.pingora.fyi/collections/post/documents/search"
-
-    params = {
-        "q": query,
-        "query_by": "post_title,category,stars,director,imdb_id",
-        "query_by_weights": "4,2,2,2,4",
-        "sort_by": "_text_match:desc,sort_by_date:desc",
-        "per_page": 50,
-        "highlight_fields": "none",
-        "use_cache": "true",
-        "page": 1,
-        "analytics_tag": today,
-    }
-
-    clients = [
-        (api_session, "requests"),
-        (site_session, "curl_cffi"),
-    ]
-
-    for client, name in clients:
-        try:
-            resp = client.get(api_url, params=params, timeout=12)
-            print(f"Typesense {name}: {resp.status_code}")
-
-            if resp.status_code != 200:
-                print(resp.text[:200])
-                continue
-
-            data = resp.json()
-            hits = data.get("hits", []) if isinstance(data, dict) else []
-
-            print(f"Typesense {name} hits: {len(hits)}")
-
-            if not hits:
-                continue
-
-            parsed = parse_typesense_hits(hits)
-
-            if parsed:
-                return parsed
-
-        except Exception as e:
-            print(f"Typesense {name} error: {e}")
-
-    return []
-
-
-def wp_search(query):
-    wp_url = f"{BASE_URL}/wp-json/wp/v2/search"
-    wp_params = {
-        "search": query,
-        "per_page": 50,
-    }
-
-    clients = [
-        (api_session, "requests"),
-        (site_session, "curl_cffi"),
-    ]
-
-    for client, name in clients:
-        try:
-            resp = client.get(wp_url, params=wp_params, timeout=12)
-            print(f"WP {name}: {resp.status_code}")
-
-            if resp.status_code != 200:
-                continue
-
-            data = resp.json()
-
-            if not isinstance(data, list):
-                continue
-
-            results = []
-            seen = set()
-
-            for item in data:
-                title = item.get("title", "")
-
-                if isinstance(title, dict):
-                    title = title.get("rendered", "")
-
-                title = html_lib.unescape(str(title)).strip()
-                url = item.get("url") or item.get("link") or ""
-                url = normalize_search_url(url)
-
-                if not title or not url:
-                    continue
-
-                if is_garbage_title(title):
-                    continue
-
-                if url in seen:
-                    continue
-
-                seen.add(url)
-
-                results.append({
-                    "title": title,
-                    "url": url,
-                    "id": encode_token(url),
-                })
-
-            print(f"WP {name} hits: {len(results)}")
-
-            if results:
-                return results
-
-        except Exception as e:
-            print(f"WP {name} error: {e}")
-
-    return []
-
-
-def local_search(query):
-    q = query.lower()
-    results = []
-    seen = set()
-
-    for movie in fetch_latest_movies():
-        if q in movie["title"].lower() and movie["url"] not in seen:
-            seen.add(movie["url"])
-            results.append({
-                "title": movie["title"],
-                "url": movie["url"],
-                "id": movie.get("id") or encode_token(movie["url"]),
-            })
-
-    return results
-
-
-def merge_results(results, seen, new_results):
-    for movie in new_results:
-        url = movie.get("url") or ""
-
-        if not url or url in seen:
-            continue
-
-        seen.add(url)
-
-        if not movie.get("id"):
-            movie["id"] = encode_token(url)
-
-        results.append(movie)
-
-
-def get_valid_saved():
-    now = time.time()
-    valid = {}
-
-    for title, data in list(saved_movies.items()):
-        if now - data.get("saved_at", 0) <= SAVED_DURATION:
-            valid[title] = data
-        else:
-            del saved_movies[title]
-
-    return valid
-
-
-def fetch_page(url, timeout=15):
-    last_exc = None
-
-    for sess in (site_session, std_site_session):
-        try:
-            resp = sess.get(url, timeout=timeout, allow_redirects=True)
-
-            if resp.status_code == 200 and resp.text:
-                return resp.text
-
-            last_exc = RuntimeError(f"HTTP {resp.status_code} for {url}")
-            print(f"fetch_page {url} -> {resp.status_code}")
-
-        except Exception as e:
-            last_exc = e
-            print(f"fetch_page error {url}: {e}")
-
-    if last_exc:
-        raise last_exc
-
-    raise RuntimeError("fetch_page failed")
-
-
-def post_form(url, data, timeout=15):
-    for sess in (site_session, std_site_session):
-        try:
-            resp = sess.post(url, data=data, timeout=timeout, allow_redirects=True)
-
-            if resp.status_code == 200 and resp.text:
-                return resp.text
-
-        except Exception as e:
-            print(f"post_form error {url}: {e}")
-
-    return ""
-
-
-def candidate_links(html_text, base_url):
-    if not html_text:
-        return []
-
-    text = normalize_html(html_text)
-    found = {}
-    soup = BeautifulSoup(text, "html.parser")
-
-    for a in soup.find_all("a", href=True):
-        href = (a.get("href") or "").strip()
-
-        if not href or href.startswith("#") or href.lower().startswith("javascript:"):
-            continue
-
-        full = urljoin(base_url, href)
-        full = trim_url(full)
-
-        if not full.startswith("http"):
-            continue
-
-        low = full.lower()
-
-        if any(x in low for x in ("t3apac", "fslv2", "negn6f")):
-            continue
-
-        label = (
-            a.get_text(" ", strip=True)
-            + " "
-            + (a.get("title") or "")
-        ).lower()
-
-        score = 0
-
-        if "1080p" in label:
-            score += 30
-        elif "720p" in label:
-            score += 20
-        elif "480p" in label:
-            score += 10
-
-        if "generate" in label and "download" in label:
-            score += 35
-
-        if "direct" in label and "download" in label:
-            score += 25
-
-        if "download" in label:
-            score += 10
-
-        if "hubcloud" in low:
-            score += 30
-
-        if "gadgetsweb" in low:
-            score += 20
-
-        if "hubdrive" in low:
-            score += 20
-
-        if "hubcloud" in label or "hubdrive" in label or "gadgets" in label:
-            score += 10
-
-        if score > 0:
-            found[full] = max(found.get(full, 0), score)
-
-    for match in re.findall(r'https?://[^\s"\'<>]+', text):
-        full = trim_url(match)
-        low = full.lower()
-
-        if any(x in low for x in ("t3apac", "fslv2", "negn6f")):
-            continue
-
-        if any(k in low for k in ("hubcloud", "gadgetsweb", "hubdrive")):
-            found[full] = max(found.get(full, 0), 15)
-
-    for b64 in re.findall(r'[A-Za-z0-9+/=_-]{40,}', text):
-        padded = b64 + "=" * (-len(b64) % 4)
-
-        for decoder in (base64.b64decode, base64.urlsafe_b64decode):
-            try:
-                decoded = decoder(padded).decode("utf-8", errors="ignore")
-            except Exception:
-                continue
-
-            low_dec = decoded.lower()
-
-            if not any(k in low_dec for k in ("hubcloud", "gadgetsweb", "hubdrive")):
-                continue
-
-            for match in re.findall(r'https?://[^\s"\'<>]+', decoded):
-                full = trim_url(match)
-                if full.startswith("http"):
-                    found[full] = max(found.get(full, 0), 25)
-
-    return sorted(((score, url) for url, score in found.items()), key=lambda x: x[0], reverse=True)
-
-
-def find_hubcloud_link(html_text, base_url):
-    for _, link in candidate_links(html_text, base_url):
-        low = link.lower()
-        if "hubcloud" in low or "gadgetsweb" in low or "hubdrive" in low:
-            return link
-
     return None
 
+def get_best_link(movie_soup, base_url):
+    candidates = []
+    for a_tag in movie_soup.find_all('a', href=True):
+        text = a_tag.get_text(strip=True)
+        if "1080p" in text:
+            href = a_tag['href']
+            if not href.startswith('http'):
+                href = urllib.parse.urljoin(base_url, href)
+                
+            size_match = re.search(r'(\d+(?:\.\d+)?)\s*(GB|MB)', text, re.I)
+            size_gb = 0.0
+            if size_match:
+                val = float(size_match.group(1))
+                unit = size_match.group(2).upper()
+                size_gb = val / 1024 if unit == 'MB' else val
+            
+            if size_gb > 0:
+                candidates.append({'href': href, 'text': text, 'size': size_gb})
+            
+    if not candidates:
+        return None
+
+    def sort_key(c):
+        if 2.0 <= c['size'] <= 6.0: return 1
+        if c['size'] > 6.0: return 2
+        return 3 
+
+    candidates.sort(key=sort_key)
+    return candidates[0]['href']
 
 def extract_hubcloud_from_gadgets(url):
     try:
         resp = session.get(url, timeout=15)
-        soup = BeautifulSoup(resp.text, 'html.parser')
-        for a in soup.find_all('a', href=True):
-            if 'hubcloud' in a['href'].lower():
-                return a['href']
-        return None
-    except:
-        return None
+        token_match = re.search(r"s\('o','([^']+)'", resp.text)
+        if token_match:
+            hubcloud_url = decrypt_token(token_match.group(1))
+            if hubcloud_url:
+                if "hblinks" in hubcloud_url:
+                    print(f"    [🔄] Detected HBLinks page, extracting HubCloud...")
+                    hb_resp = session.get(hubcloud_url, timeout=15)
+                    hb_soup = BeautifulSoup(hb_resp.text, 'html.parser')
+                    for a in hb_soup.find_all('a'):
+                        text = a.get_text(strip=True).lower()
+                        href = str(a.get('href', '')).lower()
+                        if 'hubcloud' in text or 'hubcloud' in href:
+                            return a['href']
+                    return None
+                return hubcloud_url
+    except Exception:
+        pass
+    return None
 
 def extract_hubcloud_from_hubdrive(url):
     try:
         resp = session.get(url, timeout=15)
         soup = BeautifulSoup(resp.text, 'html.parser')
-        for a in soup.find_all('a', href=True):
-            h = a['href']
-            if 'hubcloud' in h.lower():
-                return h
-        return None
-    except:
-        return None
+        for a in soup.find_all('a'):
+            text = a.get_text(strip=True).lower()
+            href = str(a.get('href', '')).lower()
+            if 'hubcloud' in text or 'hubcloud' in href:
+                return a['href']
+    except Exception:
+        pass
+    return None
+
+def convert_pixeldrain_to_direct(url):
+    url = url.replace('pixeldrain.com', 'pixeldrain.dev')
+    if "pixeldrain.dev/u/" in url:
+        file_id = url.split("/u/")[-1].split("?")[0]
+        direct_url = f"https://pixeldrain.dev/api/file/{file_id}?download"
+        return direct_url
+    return url
 
 def process_hubcloud(hubcloud_url):
     try:
+        print(f"    [☁️] Processing HubCloud...")
         resp = session.get(hubcloud_url, timeout=15)
-        html_text = resp.text.replace('&amp;', '&').replace('\\u0026', '&').replace('\u0026', '&')
-        
-        fsl, pixel = extract_links(html_text)
-        if fsl or pixel:
-            return fsl, pixel
-            
-        soup = BeautifulSoup(html_text, 'html.parser')
-        generate_url = None
-        for a in soup.find_all('a', href=True):
-            text = a.get_text(strip=True).lower()
-            if 'generate' in text and 'download' in text:
-                generate_url = a['href']
-                break
-            elif 'direct' in text and 'download' in text:
-                generate_url = a['href']
-                break
-            elif 'download' in text and 'link' in text:
-                generate_url = a['href']
-                break
-        
-        if generate_url:
-            generate_url = urljoin(hubcloud_url, generate_url)
-            resp2 = session.get(generate_url, timeout=15)
-            html_text2 = resp2.text.replace('&amp;', '&').replace('\\u0026', '&').replace('\u0026', '&')
-            fsl, pixel = extract_links(html_text2)
-            if fsl or pixel:
-                return fsl, pixel
-                
-        return None, None
-    except:
-        return None, None
-
-def get_best_link(url):
-    try:
-        resp = session.get(url, timeout=15)
-        resp.raise_for_status()
         soup = BeautifulSoup(resp.text, 'html.parser')
-        download_links = []
         
-        # 1. Link extraction from movie page (1080p/720p/480p)
-        for a in soup.find_all('a', href=True):
+        gen_btn = soup.find('a', id='download')
+        if not gen_btn:
+            for a in soup.find_all('a'):
+                text = a.get_text(strip=True).lower()
+                if 'generate' in text and 'download' in text:
+                    gen_btn = a
+                    break
+        
+        if not gen_btn or not gen_btn.get('href'):
+            return None
+            
+        gen_url = gen_btn['href']
+        if not gen_url.startswith('http'):
+            gen_url = urllib.parse.urljoin(hubcloud_url, gen_url)
+            
+        print(f"      [*] Download list page par jaa rahe hain...")
+        gen_resp = session.get(gen_url, timeout=15)
+        
+        html_text = gen_resp.text.replace('&amp;', '&').replace('\\u0026', '&').replace('\u0026', '&')
+        gen_soup = BeautifulSoup(html_text, 'html.parser')
+        
+        # PRIORITY 1: FSL SERVER (28800)
+        for a in gen_soup.find_all('a'):
             text = a.get_text(strip=True).lower()
-            if '1080p' in text and ('download' in text or 'hubcloud' in text or 'gadgets' in text or 'drive' in text or 'greenmotors' in text):
-                download_links.append(a['href'])
-            elif '720p' in text and ('download' in text or 'hubcloud' in text or 'gadgets' in text or 'drive' in text or 'greenmotors' in text):
-                download_links.append(a['href'])
-            elif '480p' in text and ('download' in text or 'hubcloud' in text or 'gadgets' in text or 'drive' in text or 'greenmotors' in text):
-                download_links.append(a['href'])
+            href = a.get('href', '')
+            if 'fsl server' in text and 'fslv2' not in text:
+                if href and 'http' in href:
+                    print(f"      [✅] FSL Server Link mila (Direct Button)!")
+                    return href
         
-        if not download_links:
-            for a in soup.find_all('a', href=True):
-                href = a['href']
-                if any(x in href.lower() for x in ['hubcloud', 'gadgets', 'drive', 'greenmotors']):
-                    download_links.append(href)
+        all_r2_links = re.findall(r'https?://[a-zA-Z0-9._-]+\.r2\.cloudflarestorage\.com/[^\s"\'<>]+', html_text)
+        valid_r2_links = [l for l in all_r2_links if 't3apac' not in l.lower() and 'fslv2' not in l.lower()]
+        
+        if valid_r2_links:
+            for link in valid_r2_links:
+                if 'X-Amz-Expires=28800' in link:
+                    print(f"      [✅] FSL Server Link mila (Regex 28800)!")
+                    return link
+            print(f"      [⚠️] FSL Server Link mila (Regex Fallback)!")
+            return valid_r2_links[0]
 
-        # 2. Process the found links directly
-        if download_links:
-            for dl in download_links:
-                dl_low = dl.lower()
-                if 'hubcloud' in dl_low:
-                    fsl, pixel = process_hubcloud(dl)
-                    if fsl or pixel: return fsl, pixel
-                elif 'gadgets' in dl_low:
-                    hc = extract_hubcloud_from_gadgets(dl)
-                    if hc:
-                        fsl, pixel = process_hubcloud(hc)
-                        if fsl or pixel: return fsl, pixel
-                elif 'hubdrive' in dl_low:
-                    hc = extract_hubcloud_from_hubdrive(dl)
-                    if hc:
-                        fsl, pixel = process_hubcloud(hc)
-                        if fsl or pixel: return fsl, pixel
-                else:
-                    # Handle greenmotors and generic pages
-                    resp2 = session.get(dl, timeout=15)
-                    html_text = resp2.text
-                    
-                    fsl, pixel = extract_links(html_text)
-                    if fsl or pixel: return fsl, pixel
-                    
-                    soup2 = BeautifulSoup(html_text, 'html.parser')
-                    hc = None
-                    for a2 in soup2.find_all('a', href=True):
-                        if 'hubcloud' in a2['href'].lower():
-                            hc = a2['href']
-                            break
-                    
-                    if hc:
-                        fsl, pixel = process_hubcloud(hc)
-                        if fsl or pixel: return fsl, pixel
-                    
-                    # Handle greenmotors CLICK TO CONTINUE form
-                    form = soup2.find('form')
-                    if form and form.get('action'):
-                        action_url = urljoin(dl, form.get('action'))
-                        data = {i.get('name'): i.get('value', '') for i in form.find_all('input') if i.get('name')}
-                        resp3 = session.post(action_url, data=data, timeout=15)
+        # PRIORITY 2: PIXELSERVER (Deep Search Fallback)
+        print(f"      [!] FSL nahi mila, PixelServer ke liye Deep Search shuru...")
+        found_links = set()
+        
+        for match in re.finditer(r'pixeldrain\.(?:dev|com)/u/([a-zA-Z0-9]+)', html_text):
+            found_links.add(match.group(1))
+            
+        for a in gen_soup.find_all('a'):
+            for attr in ['data-url', 'data-link', 'data-href', 'data-src']:
+                val = a.get(attr)
+                if val:
+                    for m in re.finditer(r'pixeldrain\.(?:dev|com)/u/([a-zA-Z0-9]+)', val):
+                        found_links.add(m.group(1))
                         
-                        fsl, pixel = extract_links(resp3.text)
-                        if fsl or pixel: return fsl, pixel
-                        
-                        soup3 = BeautifulSoup(resp3.text, 'html.parser')
-                        for a3 in soup3.find_all('a', href=True):
-                            if 'hubcloud' in a3['href'].lower():
-                                fsl, pixel = process_hubcloud(a3['href'])
-                                if fsl or pixel: return fsl, pixel
+        for match in re.finditer(r'[a-zA-Z0-9+/]{20,}={0,2}', html_text):
+            b64_str = match.group(0)
+            try:
+                decoded = base64.b64decode(b64_str + "=" * ((4 - len(b64_str) % 4) % 4)).decode('utf-8')
+                for m in re.finditer(r'pixeldrain\.(?:dev|com)/u/([a-zA-Z0-9]+)', decoded):
+                    found_links.add(m.group(1))
+            except: pass
+            
+        for match in re.finditer(r"atob\(['\"]([^'\"]+)['\"]\)", html_text):
+            b64_str = match.group(1)
+            try:
+                decoded = base64.b64decode(b64_str + "=" * ((4 - len(b64_str) % 4) % 4)).decode('utf-8')
+                for m in re.finditer(r'pixeldrain\.(?:dev|com)/u/([a-zA-Z0-9]+)', decoded):
+                    found_links.add(m.group(1))
+            except: pass
+            
+        parsed_url = urllib.parse.urlparse(gen_url)
+        query_params = urllib.parse.parse_qs(parsed_url.query)
+        for key, values in query_params.items():
+            for val in values:
+                try:
+                    decoded = base64.b64decode(val + "=" * ((4 - len(val) % 4) % 4)).decode('utf-8')
+                    for m in re.finditer(r'pixeldrain\.(?:dev|com)/u/([a-zA-Z0-9]+)', decoded):
+                        found_links.add(m.group(1))
+                except: pass
+                for m in re.finditer(r'pixeldrain\.(?:dev|com)/u/([a-zA-Z0-9]+)', val):
+                    found_links.add(m.group(1))
 
-        # 3. Fallback check on movie page
-        html_text = resp.text
-        return extract_links(html_text)
+        real_ids = [id for id in found_links if id != 'negn6f']
+        
+        target_url = None
+        if real_ids:
+            target_url = f"https://pixeldrain.dev/u/{real_ids[0]}"
+            print(f"      [✅] Real Pixel Link mila (Deep Search): {target_url}")
+        elif found_links:
+            target_url = f"https://pixeldrain.dev/u/{list(found_links)[0]}"
+            print(f"      [⚠️] Sirf placeholder link mila: {target_url}")
+        else:
+            print("      [❌] Page par koi bhi asli PixelDrain link nahi mila.")
+            return None
+
+        if target_url:
+            final_direct_pixel = convert_pixeldrain_to_direct(target_url)
+            print(f"      [🔄] Pixel Link Direct API me convert ho gaya: {final_direct_pixel}")
+            return final_direct_pixel
+
+        return None
+                
     except Exception as e:
-        print(f"Error in get_best_link: {e}")
-        return None, None
+        print(f"    [❌] HubCloud Error: {e}")
+    return None
 
-@app.route("/play")
-def play():
-    raw = request.args.get("url", "").strip()
 
-    if not raw:
-        return "Missing URL", 400
+# ================= नए सर्च फंक्शन्स =================
 
-    movie_url = fix_movie_url(decode_token(raw))
+def get_valid_saved():
+    now = time.time()
+    valid = {}
+    for title, data in list(saved_movies.items()):
+        if now - data.get("saved_at", 0) <= SAVED_DURATION:
+            valid[title] = data
+        else:
+            del saved_movies[title]
+    return valid
 
-    if not movie_url.startswith("http://") and not movie_url.startswith("https://"):
-        return "Invalid URL", 400
+def typesense_search(query):
+    api_url = "https://search.pingora.fyi/collections/post/documents/search"
+    params = {
+        "q": query, "query_by": "post_title,category", "per_page": 30, "page": 1,
+    }
+    try:
+        resp = session.get(api_url, params=params, timeout=10)
+        if resp.status_code == 200:
+            hits = resp.json().get("hits", [])
+            results = []
+            for hit in hits:
+                doc = hit.get("document", {})
+                title = doc.get("post_title", "")
+                permalink = doc.get("permalink", "")
+                if title and permalink:
+                    if not permalink.startswith('http'):
+                        permalink = BASE_URL + permalink
+                    results.append({"title": title, "url": permalink})
+            return results
+    except Exception as e:
+        print(f"Typesense error: {e}")
+    return []
+
+def wp_search(query):
+    wp_url = f"{BASE_URL}/wp-json/wp/v2/search"
+    try:
+        resp = session.get(wp_url, params={"search": query, "per_page": 30}, timeout=10)
+        if resp.status_code == 200:
+            results = []
+            for item in resp.json():
+                title = item.get("title", "")
+                if isinstance(title, dict): title = title.get("rendered", "")
+                url = item.get("url", "")
+                if title and url:
+                    if not url.startswith('http'): url = BASE_URL + url
+                    results.append({"title": title, "url": url})
+            return results
+    except Exception as e:
+        print(f"WP error: {e}")
+    return []
+
+# ================= FLASK ROUTES =================
+
+@app.route('/')
+def home():
+    # UI के लिए HTML
+    saved_html = ""
+    for title, data in get_valid_saved().items():
+        title_esc = html_lib.escape(title)
+        title_q = quote(title, safe="")
+        saved_html += f'''
+        <div style="background:#222; padding:10px; margin:5px 0; border-radius:5px; display:flex; justify-content:space-between;">
+            <span>{title_esc}</span>
+            <a href="/remove/{title_q}" style="color:red; text-decoration:none;">Remove</a>
+        </div>'''
+    
+    if not saved_html: saved_html = "<p style='color:#888;'>No saved movies yet.</p>"
+
+    return f"""
+    <!DOCTYPE html>
+    <html>
+    <head><meta name="viewport" content="width=device-width, initial-scale=1"><title>HDHub Scraper</title></head>
+    <body style="font-family: Arial; background:#111; color:#fff; padding:20px; text-align:center;">
+        <h1>🎬 HDHub4u Scraper</h1>
+        <form action="/search" method="get">
+            <input type="text" name="q" placeholder="Search movie..." required style="padding:10px; width:70%; max-width:300px; border-radius:5px; border:none;">
+            <button type="submit" style="padding:10px 20px; background:#007bff; color:#fff; border:none; border-radius:5px;">Search</button>
+        </form>
+        
+        <h3 style="margin-top:40px;">⭐ Saved Movies</h3>
+        {saved_html}
+        
+        <br><br>
+        <a href="/playlist.m3u" style="color:#28a745; font-weight:bold; font-size:18px; text-decoration:none;">📥 Download M3U Playlist</a>
+    </body>
+    </html>
+    """
+
+@app.route('/search')
+def search():
+    query = request.args.get("q", "").strip()
+    if not query: return redirect("/")
+    
+    results = typesense_search(query)
+    if not results: results = wp_search(query)
+    
+    results_html = ""
+    for movie in results:
+        title_esc = html_lib.escape(movie["title"])
+        # URL को Base64 में एनकोड करके Save बटन में भेजेंगे
+        enc_url = base64.urlsafe_b64encode(movie["url"].encode()).decode()
+        title_q = quote(movie["title"], safe="")
+        
+        results_html += f'''
+        <div style="background:#222; padding:15px; margin:10px 0; border-radius:5px; display:flex; justify-content:space-between; align-items:center;">
+            <span style="max-width:70%; font-size:14px;">{title_esc}</span>
+            <form action="/save" method="post" style="margin:0;">
+                <input type="hidden" name="title" value="{title_q}">
+                <input type="hidden" name="url" value="{enc_url}">
+                <button type="submit" style="padding:8px 15px; background:#28a745; color:#fff; border:none; border-radius:5px; cursor:pointer;">Save</button>
+            </form>
+        </div>'''
+        
+    if not results_html:
+        results_html = "<p style='color:#aaa;'>No movies found. Try different spelling.</p>"
+
+    return f"""
+    <!DOCTYPE html>
+    <html>
+    <head><meta name="viewport" content="width=device-width, initial-scale=1"><title>Search Results</title></head>
+    <body style="font-family: Arial; background:#111; color:#fff; padding:20px;">
+        <a href="/" style="color:#fff; text-decoration:none;">⬅ Back</a>
+        <h3>Results for: "{html_lib.escape(query)}"</h3>
+        {results_html}
+    </body>
+    </html>
+    """
+
+@app.route('/save', methods=['POST'])
+def save():
+    title = unquote(request.form.get("title", "")).strip()
+    enc_url = request.form.get("url", "").strip()
+    
+    if title and enc_url:
+        try:
+            movie_url = base64.urlsafe_b64decode(enc_url.encode()).decode()
+            saved_movies[title] = {"title": title, "url": movie_url, "saved_at": time.time()}
+        except Exception:
+            pass
+            
+    return redirect("/")
+
+@app.route('/remove/<path:title>')
+def remove(title):
+    title = unquote(title)
+    saved_movies.pop(title, None)
+    return redirect("/")
+
+
+@app.route('/playlist.m3u')
+def get_playlist():
+    global cache_data
+    # 1 hour cache
+    if cache_data["m3u"] and (time.time() - cache_data["timestamp"] < 3600):
+        # 🛑 Cache से पहले चेक करें कि कहीं नई मूवी सेव हुई है या नहीं
+        # अगर सेव हुई है तो उसे मिलाकर दें
+        saved_part = ""
+        for title, data in get_valid_saved().items():
+            enc_url = base64.urlsafe_b64encode(data["url"].encode()).decode()
+            saved_part += f'#EXTINF:-1 group-title="⭐ Saved Movies",{title}\n'
+            saved_part += f'https://{request.host}/play?url={enc_url}\n'
+        return Response(cache_data["m3u"] + saved_part, mimetype='audio/x-mpegurl')
+
+    categories = [
+        ("bollywood-movies", "Bollywood Movies"),
+        ("south-hindi-movies", "South Hindi Movies")
+    ]
+    
+    m3u = "#EXTM3U\n"
+    seen_urls = set() 
+    total_movies = 0
+    
+    for cat_url, cat_name in categories:
+        for page in range(1, 10):
+            try:
+                url = f"{BASE_URL}/category/{cat_url}/page/{page}/"
+                resp = session.get(url, timeout=15)
+                
+                if resp.status_code != 200:
+                    continue
+                    
+                soup = BeautifulSoup(resp.text, 'html.parser')
+                
+                for a_tag in soup.find_all('a', href=True):
+                    title = a_tag.get_text(strip=True)
+                    href = a_tag['href']
+                    
+                    if not title or len(title) < 10: 
+                        continue
+                        
+                    if "(2026)" not in title and "(2025)" not in title: 
+                        continue
+                        
+                    if not href.startswith('http'):
+                        href = BASE_URL + href
+                    
+                    if BASE_URL not in href:
+                        continue
+                        
+                    if '/category/' in href or '/page/' in href or 'how-to-download' in href:
+                        continue
+                        
+                    exclude = ["season", "ep-", "episode", "series", "s01", "s02", "how to download", "telegram", "play"]
+                    if any(kw in title.lower() for kw in exclude): 
+                        continue
+                    
+                    if href in seen_urls:
+                        continue
+                    
+                    seen_urls.add(href)
+                    total_movies += 1
+                    
+                    encoded_url = base64.urlsafe_b64encode(href.encode()).decode()
+                    
+                    m3u += f'#EXTINF:-1 group-title="{cat_name}",{title}\n'
+                    m3u += f'https://{request.host}/play?url={encoded_url}\n'
+                    
+            except Exception as e:
+                print(f"[!] Error fetching {cat_name} page {page}: {e}")
+
+    print(f"[+] Total movies added to playlist: {total_movies}")
+    
+    # 🛑 मुख्य लिस्ट बनने के बाद, सेव की हुई मूवीज भी जोड़ें
+    for title, data in get_valid_saved().items():
+        enc_url = base64.urlsafe_b64encode(data["url"].encode()).decode()
+        m3u += f'#EXTINF:-1 group-title="⭐ Saved Movies",{title}\n'
+        m3u += f'https://{request.host}/play?url={enc_url}\n'
+    
+    cache_data["m3u"] = m3u
+    cache_data["timestamp"] = time.time()
+    
+    return Response(m3u, mimetype='audio/x-mpegurl')
+
+# 🛑 आपका बेस प्ले लॉजिक (बिल्कुल अनछुआ)
+@app.route('/play')
+def play_movie():
+    encoded_url = request.args.get('url')
+    if not encoded_url:
+        return "No URL provided", 400
 
     try:
-        fsl, pixel = get_best_link(movie_url)
+        movie_url = base64.urlsafe_b64decode(encoded_url.encode()).decode()
+    except Exception:
+        return "Invalid URL encoding", 400
 
-        if fsl:
-            return redirect(fsl)
+    try:
+        movie_resp = session.get(movie_url, timeout=15)
+        movie_soup = BeautifulSoup(movie_resp.text, 'html.parser')
+        
+        best_link = get_best_link(movie_soup, movie_url)
+        if not best_link:
+            return "No 1080p link found for this movie", 404
 
-        if pixel:
-            return redirect(pixel)
+        hubcloud = None
+        if "greenmotors" in best_link or "gadgetsweb" in best_link:
+            hubcloud = extract_hubcloud_from_gadgets(best_link)
+        elif "hubdrive.blog" in best_link:
+            hubcloud = extract_hubcloud_from_hubdrive(best_link)
+        else:
+            hubcloud = best_link
 
-        return "No valid FSL 28800 or PixelDrain link found.", 404
-
+        if hubcloud:
+            final_link = process_hubcloud(hubcloud)
+            if final_link:
+                return redirect(final_link, code=302)
+                
+        return "Failed to extract final HubCloud link.", 500
+        
     except Exception as e:
-        print(f"Play error for {movie_url}: {e}")
-        return f"Playback link generate nahi hua: {type(e).__name__}", 404
+        return f"Error during extraction: {str(e)}", 500
 
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port)
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=10000)
