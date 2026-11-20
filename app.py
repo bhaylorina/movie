@@ -5,7 +5,7 @@ import base64
 import codecs
 import html as html_lib
 from datetime import date
-from urllib.parse import urljoin, quote, unquote, urlencode
+from urllib.parse import urljoin, urlsplit, quote, unquote, urlencode
 
 from flask import Flask, request, redirect
 from bs4 import BeautifulSoup
