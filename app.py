@@ -4,29 +4,42 @@ import json
 import base64
 import urllib.parse
 import html as html_lib
-from urllib.parse import quote, unquote
+from datetime import date
+from urllib.parse import quote, unquote, urlsplit
 from bs4 import BeautifulSoup
-from curl_cffi import requests
+from curl_cffi import requests as cffi_requests
+import requests as std_requests
 from flask import Flask, request, redirect, Response
 
 app = Flask(__name__)
 
 BASE_URL = "https://new15.hdhub4u.cl"
 
-# curl_cffi session
-session = requests.Session(impersonate="chrome110")
+UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+
+# बेस स्क्रिप्ट का स्क्रैपिंग सेशन
+session = cffi_requests.Session(impersonate="chrome110")
 session.headers.update({
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36',
+    'User-Agent': UA,
     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
     'Accept-Language': 'en-US,en;q=0.5',
 })
 
+# 🛑 नया: सर्च API के लिए अलग सेशन और हेडर्स
+API_HEADERS = {
+    "User-Agent": UA,
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Origin": BASE_URL,
+    "Referer": BASE_URL + "/",
+}
+api_session = std_requests.Session()
+api_session.headers.update(API_HEADERS)
+
 # Simple In-Memory Cache
 cache_data = {"m3u": None, "timestamp": 0}
-
-# 🛑 नया: Saved Movies के लिए डिक्शनरी
 saved_movies = {}
-SAVED_DURATION = 3 * 24 * 60 * 60  # 3 दिन का टाइमर
+SAVED_DURATION = 3 * 24 * 60 * 60  # 3 दिन
 
 def rot13(s):
     res = []
@@ -92,7 +105,6 @@ def extract_hubcloud_from_gadgets(url):
             hubcloud_url = decrypt_token(token_match.group(1))
             if hubcloud_url:
                 if "hblinks" in hubcloud_url:
-                    print(f"    [🔄] Detected HBLinks page, extracting HubCloud...")
                     hb_resp = session.get(hubcloud_url, timeout=15)
                     hb_soup = BeautifulSoup(hb_resp.text, 'html.parser')
                     for a in hb_soup.find_all('a'):
@@ -123,13 +135,11 @@ def convert_pixeldrain_to_direct(url):
     url = url.replace('pixeldrain.com', 'pixeldrain.dev')
     if "pixeldrain.dev/u/" in url:
         file_id = url.split("/u/")[-1].split("?")[0]
-        direct_url = f"https://pixeldrain.dev/api/file/{file_id}?download"
-        return direct_url
+        return f"https://pixeldrain.dev/api/file/{file_id}?download"
     return url
 
 def process_hubcloud(hubcloud_url):
     try:
-        print(f"    [☁️] Processing HubCloud...")
         resp = session.get(hubcloud_url, timeout=15)
         soup = BeautifulSoup(resp.text, 'html.parser')
         
@@ -148,19 +158,16 @@ def process_hubcloud(hubcloud_url):
         if not gen_url.startswith('http'):
             gen_url = urllib.parse.urljoin(hubcloud_url, gen_url)
             
-        print(f"      [*] Download list page par jaa rahe hain...")
         gen_resp = session.get(gen_url, timeout=15)
-        
         html_text = gen_resp.text.replace('&amp;', '&').replace('\\u0026', '&').replace('\u0026', '&')
         gen_soup = BeautifulSoup(html_text, 'html.parser')
         
-        # PRIORITY 1: FSL SERVER (28800)
+        # FSL Server Priority
         for a in gen_soup.find_all('a'):
             text = a.get_text(strip=True).lower()
             href = a.get('href', '')
             if 'fsl server' in text and 'fslv2' not in text:
                 if href and 'http' in href:
-                    print(f"      [✅] FSL Server Link mila (Direct Button)!")
                     return href
         
         all_r2_links = re.findall(r'https?://[a-zA-Z0-9._-]+\.r2\.cloudflarestorage\.com/[^\s"\'<>]+', html_text)
@@ -169,25 +176,19 @@ def process_hubcloud(hubcloud_url):
         if valid_r2_links:
             for link in valid_r2_links:
                 if 'X-Amz-Expires=28800' in link:
-                    print(f"      [✅] FSL Server Link mila (Regex 28800)!")
                     return link
-            print(f"      [⚠️] FSL Server Link mila (Regex Fallback)!")
             return valid_r2_links[0]
 
-        # PRIORITY 2: PIXELSERVER (Deep Search Fallback)
-        print(f"      [!] FSL nahi mila, PixelServer ke liye Deep Search shuru...")
+        # PixelServer Fallback
         found_links = set()
-        
         for match in re.finditer(r'pixeldrain\.(?:dev|com)/u/([a-zA-Z0-9]+)', html_text):
             found_links.add(match.group(1))
-            
         for a in gen_soup.find_all('a'):
             for attr in ['data-url', 'data-link', 'data-href', 'data-src']:
                 val = a.get(attr)
                 if val:
                     for m in re.finditer(r'pixeldrain\.(?:dev|com)/u/([a-zA-Z0-9]+)', val):
                         found_links.add(m.group(1))
-                        
         for match in re.finditer(r'[a-zA-Z0-9+/]{20,}={0,2}', html_text):
             b64_str = match.group(0)
             try:
@@ -195,7 +196,6 @@ def process_hubcloud(hubcloud_url):
                 for m in re.finditer(r'pixeldrain\.(?:dev|com)/u/([a-zA-Z0-9]+)', decoded):
                     found_links.add(m.group(1))
             except: pass
-            
         for match in re.finditer(r"atob\(['\"]([^'\"]+)['\"]\)", html_text):
             b64_str = match.group(1)
             try:
@@ -217,31 +217,18 @@ def process_hubcloud(hubcloud_url):
                     found_links.add(m.group(1))
 
         real_ids = [id for id in found_links if id != 'negn6f']
-        
-        target_url = None
         if real_ids:
-            target_url = f"https://pixeldrain.dev/u/{real_ids[0]}"
-            print(f"      [✅] Real Pixel Link mila (Deep Search): {target_url}")
+            return convert_pixeldrain_to_direct(f"https://pixeldrain.dev/u/{real_ids[0]}")
         elif found_links:
-            target_url = f"https://pixeldrain.dev/u/{list(found_links)[0]}"
-            print(f"      [⚠️] Sirf placeholder link mila: {target_url}")
-        else:
-            print("      [❌] Page par koi bhi asli PixelDrain link nahi mila.")
-            return None
-
-        if target_url:
-            final_direct_pixel = convert_pixeldrain_to_direct(target_url)
-            print(f"      [🔄] Pixel Link Direct API me convert ho gaya: {final_direct_pixel}")
-            return final_direct_pixel
+            return convert_pixeldrain_to_direct(f"https://pixeldrain.dev/u/{list(found_links)[0]}")
 
         return None
-                
     except Exception as e:
-        print(f"    [❌] HubCloud Error: {e}")
+        print(f"HubCloud Error: {e}")
     return None
 
 
-# ================= नए सर्च फंक्शन्स =================
+# ================= 🛑 नया: बेहतर सर्च फंक्शन्स =================
 
 def get_valid_saved():
     now = time.time()
@@ -253,52 +240,69 @@ def get_valid_saved():
             del saved_movies[title]
     return valid
 
+def fix_movie_url(url):
+    if not url: return ""
+    url = url.strip()
+    base = urlsplit(BASE_URL)
+    if url.startswith("//"): url = "https:" + url
+    if not url.startswith("http"): return f"{base.scheme}://{base.netloc}/{url.lstrip('/')}"
+    if "hdhub4u" in url.lower() or "hdhub" in url.lower():
+        parsed = urlsplit(url)
+        return f"{base.scheme}://{base.netloc}{parsed.path}"
+    return url
+
 def typesense_search(query):
+    today = date.today().isoformat()
     api_url = "https://search.pingora.fyi/collections/post/documents/search"
     params = {
-        "q": query, "query_by": "post_title,category", "per_page": 30, "page": 1,
+        "q": query, "query_by": "post_title,category,stars,director,imdb_id",
+        "query_by_weights": "4,2,2,2,4", "sort_by": "_text_match:desc,sort_by_date:desc",
+        "per_page": 50, "highlight_fields": "none", "use_cache": "true", "page": 1, "analytics_tag": today
     }
-    try:
-        resp = session.get(api_url, params=params, timeout=10)
-        if resp.status_code == 200:
-            hits = resp.json().get("hits", [])
-            results = []
-            for hit in hits:
-                doc = hit.get("document", {})
-                title = doc.get("post_title", "")
-                permalink = doc.get("permalink", "")
-                if title and permalink:
-                    if not permalink.startswith('http'):
-                        permalink = BASE_URL + permalink
-                    results.append({"title": title, "url": permalink})
-            return results
-    except Exception as e:
-        print(f"Typesense error: {e}")
+    
+    # हम पहले api_session (requests) ट्राई करेंगे, फिर base session (curl_cffi)
+    for client in (api_session, session):
+        try:
+            resp = client.get(api_url, params=params, timeout=10)
+            if resp.status_code == 200:
+                hits = resp.json().get("hits", [])
+                results = []
+                for hit in hits:
+                    doc = hit.get("document", {})
+                    title = doc.get("post_title", "")
+                    permalink = doc.get("permalink", "")
+                    if title and permalink:
+                        url = fix_movie_url(permalink)
+                        results.append({"title": title, "url": url})
+                if results:
+                    return results
+        except Exception as e:
+            print(f"Typesense error: {e}")
     return []
 
 def wp_search(query):
     wp_url = f"{BASE_URL}/wp-json/wp/v2/search"
-    try:
-        resp = session.get(wp_url, params={"search": query, "per_page": 30}, timeout=10)
-        if resp.status_code == 200:
-            results = []
-            for item in resp.json():
-                title = item.get("title", "")
-                if isinstance(title, dict): title = title.get("rendered", "")
-                url = item.get("url", "")
-                if title and url:
-                    if not url.startswith('http'): url = BASE_URL + url
-                    results.append({"title": title, "url": url})
-            return results
-    except Exception as e:
-        print(f"WP error: {e}")
+    for client in (api_session, session):
+        try:
+            resp = client.get(wp_url, params={"search": query, "per_page": 50}, timeout=10)
+            if resp.status_code == 200:
+                results = []
+                for item in resp.json():
+                    title = item.get("title", "")
+                    if isinstance(title, dict): title = title.get("rendered", "")
+                    url = item.get("url", "")
+                    if title and url:
+                        results.append({"title": title, "url": fix_movie_url(url)})
+                if results:
+                    return results
+        except Exception as e:
+            print(f"WP error: {e}")
     return []
 
 # ================= FLASK ROUTES =================
 
 @app.route('/')
 def home():
-    # UI के लिए HTML
     saved_html = ""
     for title, data in get_valid_saved().items():
         title_esc = html_lib.escape(title)
@@ -336,13 +340,14 @@ def search():
     query = request.args.get("q", "").strip()
     if not query: return redirect("/")
     
+    # पहले Typesense, फिर WP Search
     results = typesense_search(query)
-    if not results: results = wp_search(query)
+    if not results:
+        results = wp_search(query)
     
     results_html = ""
     for movie in results:
         title_esc = html_lib.escape(movie["title"])
-        # URL को Base64 में एनकोड करके Save बटन में भेजेंगे
         enc_url = base64.urlsafe_b64encode(movie["url"].encode()).decode()
         title_q = quote(movie["title"], safe="")
         
@@ -395,10 +400,7 @@ def remove(title):
 @app.route('/playlist.m3u')
 def get_playlist():
     global cache_data
-    # 1 hour cache
     if cache_data["m3u"] and (time.time() - cache_data["timestamp"] < 3600):
-        # 🛑 Cache से पहले चेक करें कि कहीं नई मूवी सेव हुई है या नहीं
-        # अगर सेव हुई है तो उसे मिलाकर दें
         saved_part = ""
         for title, data in get_valid_saved().items():
             enc_url = base64.urlsafe_b64encode(data["url"].encode()).decode()
@@ -406,66 +408,39 @@ def get_playlist():
             saved_part += f'https://{request.host}/play?url={enc_url}\n'
         return Response(cache_data["m3u"] + saved_part, mimetype='audio/x-mpegurl')
 
-    categories = [
-        ("bollywood-movies", "Bollywood Movies"),
-        ("south-hindi-movies", "South Hindi Movies")
-    ]
+    categories = [("bollywood-movies", "Bollywood Movies"), ("south-hindi-movies", "South Hindi Movies")]
     
     m3u = "#EXTM3U\n"
     seen_urls = set() 
-    total_movies = 0
     
     for cat_url, cat_name in categories:
         for page in range(1, 10):
             try:
                 url = f"{BASE_URL}/category/{cat_url}/page/{page}/"
                 resp = session.get(url, timeout=15)
-                
-                if resp.status_code != 200:
-                    continue
-                    
+                if resp.status_code != 200: continue
                 soup = BeautifulSoup(resp.text, 'html.parser')
                 
                 for a_tag in soup.find_all('a', href=True):
                     title = a_tag.get_text(strip=True)
                     href = a_tag['href']
+                    if not title or len(title) < 10: continue
+                    if "(2026)" not in title and "(2025)" not in title: continue
+                    if not href.startswith('http'): href = BASE_URL + href
+                    if BASE_URL not in href: continue
+                    if '/category/' in href or '/page/' in href or 'how-to-download' in href: continue
                     
-                    if not title or len(title) < 10: 
-                        continue
-                        
-                    if "(2026)" not in title and "(2025)" not in title: 
-                        continue
-                        
-                    if not href.startswith('http'):
-                        href = BASE_URL + href
-                    
-                    if BASE_URL not in href:
-                        continue
-                        
-                    if '/category/' in href or '/page/' in href or 'how-to-download' in href:
-                        continue
-                        
                     exclude = ["season", "ep-", "episode", "series", "s01", "s02", "how to download", "telegram", "play"]
-                    if any(kw in title.lower() for kw in exclude): 
-                        continue
-                    
-                    if href in seen_urls:
-                        continue
+                    if any(kw in title.lower() for kw in exclude): continue
+                    if href in seen_urls: continue
                     
                     seen_urls.add(href)
-                    total_movies += 1
-                    
                     encoded_url = base64.urlsafe_b64encode(href.encode()).decode()
-                    
                     m3u += f'#EXTINF:-1 group-title="{cat_name}",{title}\n'
                     m3u += f'https://{request.host}/play?url={encoded_url}\n'
-                    
             except Exception as e:
                 print(f"[!] Error fetching {cat_name} page {page}: {e}")
 
-    print(f"[+] Total movies added to playlist: {total_movies}")
-    
-    # 🛑 मुख्य लिस्ट बनने के बाद, सेव की हुई मूवीज भी जोड़ें
     for title, data in get_valid_saved().items():
         enc_url = base64.urlsafe_b64encode(data["url"].encode()).decode()
         m3u += f'#EXTINF:-1 group-title="⭐ Saved Movies",{title}\n'
@@ -476,7 +451,6 @@ def get_playlist():
     
     return Response(m3u, mimetype='audio/x-mpegurl')
 
-# 🛑 आपका बेस प्ले लॉजिक (बिल्कुल अनछुआ)
 @app.route('/play')
 def play_movie():
     encoded_url = request.args.get('url')
@@ -515,4 +489,4 @@ def play_movie():
         return f"Error during extraction: {str(e)}", 500
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=10000)
+    app.run(host='0.0.0.0', port=10000, threaded=True)
