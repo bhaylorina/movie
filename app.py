@@ -5,7 +5,6 @@ import base64
 import urllib.parse
 import datetime
 from urllib.parse import urlparse
-import requests as std_requests  # Search API ke liye normal requests
 from bs4 import BeautifulSoup
 from curl_cffi import requests
 from flask import Flask, request, redirect, Response, render_template_string
@@ -14,7 +13,7 @@ app = Flask(__name__)
 
 BASE_URL = "https://new15.hdhub4u.cl"
 
-# === AAPKA ORIGINAL CURL_CFFI SESSION (No changes) ===
+# curl_cffi session
 session = requests.Session(impersonate="chrome110")
 session.headers.update({
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36',
@@ -22,10 +21,11 @@ session.headers.update({
     'Accept-Language': 'en-US,en;q=0.5',
 })
 
+# Simple In-Memory Cache
 cache_data = {"m3u": None, "timestamp": 0}
 saved_movies = {}
 
-# === AAPKE ORIGINAL EXTRACTION FUNCTIONS (No changes) ===
+# ================= AAPKE ORIGINAL FUNCTIONS (No changes) =================
 def rot13(s):
     res = []
     for char in s:
@@ -248,10 +248,9 @@ def home():
     if request.args.get('saved'):
         saved_msg = '<div style="color: #28a745; margin-bottom: 15px; font-weight: bold;">✅ Movie saved to playlist!</div>'
         
-    saved_list = list(saved_movies.keys())
     saved_html = ""
-    if saved_list:
-        for t in saved_list:
+    if saved_movies:
+        for t in saved_movies.keys():
             saved_html += f'<div class="saved-item"><span>{t}</span><a href="/remove/{urllib.parse.quote(t)}" class="remove-btn">[Remove]</a></div>'
     else:
         saved_html = '<p style="color:#aaa;font-size:14px;">No saved movies yet.</p>'
@@ -298,17 +297,15 @@ def search():
     results = []
     seen = set()
     
-    # 100% API Search (Koi website scraping nahi)
+    # EXACT search logic jo pehle kaam kar rahi thi (Using curl_cffi session)
     try:
         today = datetime.date.today().isoformat()
         api_url = "https://search.pingora.fyi/collections/post/documents/search"
-        
-        # Exact parameters jo site ke JS me use hote hain
         params = {
             'q': query,
             'query_by': 'post_title,category,stars,director,imdb_id',
             'query_by_weights': '4,2,2,2,4',
-            'sort_by': 'sort_by_date:desc',
+            'sort_by': '_text_match:desc,sort_by_date:desc', 
             'per_page': 50,
             'highlight_fields': 'none',
             'use_cache': 'true',
@@ -316,8 +313,8 @@ def search():
             'analytics_tag': today
         }
         
-        # Cloudflare se bachne ke liye normal requests use kar rahe hain
-        resp = std_requests.get(api_url, params=params, timeout=15)
+        # curl_cffi session ka use kiya taaki Cloudflare block na kare
+        resp = session.get(api_url, params=params, timeout=15)
         
         if resp.status_code == 200:
             data = resp.json()
@@ -328,7 +325,7 @@ def search():
                 
                 if not title or not permalink: 
                     continue
-                
+                    
                 parsed = urlparse(permalink)
                 path = parsed.path if parsed.scheme else permalink
                 if not path.startswith('http'):
@@ -337,11 +334,11 @@ def search():
                 if path in seen: 
                     continue
                 seen.add(path)
+                
                 results.append({'title': title, 'url': path})
     except Exception as e:
-        print(f"API Search Error: {e}")
+        print(f"Search API Error: {e}")
 
-    # Generate Results HTML
     results_html = ""
     for movie in results:
         enc_url = base64.urlsafe_b64encode(movie['url'].encode()).decode()
@@ -357,7 +354,7 @@ def search():
         """
         
     if not results_html:
-        results_html = "<p>❌ No movies found.</p>"
+        results_html = "<p style='color:#dc3545; font-weight:bold;'>❌ No movies found.</p>"
         
     return render_template_string('''
     <!DOCTYPE html>
@@ -409,6 +406,7 @@ def remove(title):
 @app.route('/playlist.m3u')
 def get_playlist():
     global cache_data
+    # 1 hour cache
     if cache_data["m3u"] and (time.time() - cache_data["timestamp"] < 0):
         base_m3u = cache_data["m3u"]
     else:
@@ -439,6 +437,7 @@ def get_playlist():
                         if not title or len(title) < 10: 
                             continue
                             
+                        # 🛑 2026 aur 2025 dono allow hain
                         if "(2026)" not in title and "(2025)" not in title: 
                             continue
                             
@@ -474,7 +473,7 @@ def get_playlist():
         cache_data["m3u"] = base_m3u
         cache_data["timestamp"] = time.time()
 
-    # Saved Movies ko append karna (Bina structure bigaade)
+    # Saved Movies ko append karna (Bina koi extra "Others" folder banaye)
     final_m3u = base_m3u
     safe_saved = {}
     now = time.time()
@@ -484,10 +483,11 @@ def get_playlist():
         else:
             safe_saved[title] = data
 
-    for title, data in safe_saved.items():
-        encoded_url = base64.urlsafe_b64encode(data['url'].encode()).decode()
-        final_m3u += f'#EXTINF:-1 group-title="⭐ Saved Movies",{title}\n'
-        final_m3u += f'https://{request.host}/play?url={encoded_url}\n'
+    if safe_saved:
+        for title, data in safe_saved.items():
+            encoded_url = base64.urlsafe_b64encode(data['url'].encode()).decode()
+            final_m3u += f'#EXTINF:-1 group-title="⭐ Saved Movies",{title}\n'
+            final_m3u += f'https://{request.host}/play?url={encoded_url}\n'
 
     return Response(final_m3u, mimetype='audio/x-mpegurl')
 
