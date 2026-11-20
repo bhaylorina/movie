@@ -5,6 +5,7 @@ import base64
 import urllib.parse
 import datetime
 from urllib.parse import urlparse
+import requests as std_requests  # API Search ke liye normal requests
 from bs4 import BeautifulSoup
 from curl_cffi import requests
 from flask import Flask, request, redirect, Response, render_template_string
@@ -13,7 +14,7 @@ app = Flask(__name__)
 
 BASE_URL = "https://new15.hdhub4u.cl"
 
-# curl_cffi session
+# curl_cffi session (Aapke base script se bilkul same)
 session = requests.Session(impersonate="chrome110")
 session.headers.update({
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36',
@@ -25,6 +26,7 @@ session.headers.update({
 cache_data = {"m3u": None, "timestamp": 0}
 saved_movies = {}
 
+# === AAPKE ORIGINAL FUNCTIONS (No changes) ===
 def rot13(s):
     res = []
     for char in s:
@@ -172,7 +174,7 @@ def process_hubcloud(hubcloud_url):
             print(f"      [⚠️] FSL Server Link mila (Regex Fallback)!")
             return valid_r2_links[0]
 
-        # PRIORITY 2: PIXELSERVER (Deep Search Fallback)
+        # PRIORITY 2: PIXELSERVER
         print(f"      [!] FSL nahi mila, PixelServer ke liye Deep Search shuru...")
         found_links = set()
         
@@ -238,7 +240,8 @@ def process_hubcloud(hubcloud_url):
         print(f"    [❌] HubCloud Error: {e}")
     return None
 
-# ================= FLASK ROUTES =================
+
+# ================= SEARCH & WEB UI =================
 
 @app.route('/')
 def home():
@@ -296,7 +299,7 @@ def search():
     results = []
     seen = set()
     
-    # --- 1. Typesense API (No Filters) ---
+    # --- 1. Typesense API (Normal requests use kiya taaki curl_cffi block na kare) ---
     try:
         today = datetime.date.today().isoformat()
         api_url = "https://search.pingora.fyi/collections/post/documents/search"
@@ -304,14 +307,14 @@ def search():
             'q': query,
             'query_by': 'post_title,category,stars,director,imdb_id',
             'query_by_weights': '4,2,2,2,4',
-            'sort_by': '_text_match:desc,sort_by_date:desc',
+            'sort_by': 'sort_by_date:desc',
             'per_page': 50,
             'highlight_fields': 'none',
             'use_cache': 'true',
             'page': 1,
             'analytics_tag': today
         }
-        resp = session.get(api_url, params=params, timeout=15)
+        resp = std_requests.get(api_url, params=params, timeout=15)
         if resp.status_code == 200:
             data = resp.json()
             for hit in data.get('hits', []):
@@ -333,12 +336,12 @@ def search():
     except Exception as e:
         print(f"Typesense API Error: {e}")
 
-    # --- 2. WordPress Native Search API (No Filters) ---
+    # --- 2. WordPress Native Search API ---
     if len(results) < 5: 
         try:
             wp_url = f"{BASE_URL}/wp-json/wp/v2/search"
             wp_params = {'search': query, 'per_page': 50}
-            wp_resp = session.get(wp_url, params=wp_params, timeout=15)
+            wp_resp = std_requests.get(wp_url, params=wp_params, timeout=15)
             if wp_resp.status_code == 200:
                 for item in wp_resp.json():
                     title = item.get('title', '')
@@ -415,9 +418,13 @@ def remove(title):
         del saved_movies[title]
     return redirect('/')
 
+
+# ================= M3U & PLAY =================
+
 @app.route('/playlist.m3u')
 def get_playlist():
     global cache_data
+    # Base logic
     if cache_data["m3u"] and (time.time() - cache_data["timestamp"] < 0):
         base_m3u = cache_data["m3u"]
     else:
@@ -483,7 +490,7 @@ def get_playlist():
         cache_data["m3u"] = base_m3u
         cache_data["timestamp"] = time.time()
 
-    # Append Saved Movies
+    # Saved Movies ko M3U me add karna (Bina koi extra folder banaye)
     final_m3u = base_m3u
     safe_saved = {}
     now = time.time()
