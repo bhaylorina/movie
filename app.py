@@ -375,6 +375,37 @@ def is_garbage_title(title):
     return False
 
 
+def fix_movie_url(url):
+    """Kisi bhi hdhub4u mirror domain ko current BASE_URL par le aao."""
+    if not url:
+        return ""
+
+    url = url.strip()
+
+    if url.startswith("//"):
+        url = "https:" + url
+
+    if not url.startswith("http://") and not url.startswith("https://"):
+        if url.startswith("/"):
+            return BASE_URL + url
+        return BASE_URL + "/" + url
+
+    try:
+        parsed = urlsplit(url)
+    except Exception:
+        return url
+
+    host = (parsed.netloc or "").lower()
+
+    if "hdhub4u" in host or "hdhub" in host:
+        base = urlsplit(BASE_URL)
+        path = parsed.path or "/"
+        query = f"?{parsed.query}" if parsed.query else ""
+        return f"{base.scheme}://{base.netloc}{path}{query}"
+
+    return url
+
+
 def normalize_search_url(permalink):
     permalink = html_lib.unescape(str(permalink or "")).strip()
 
@@ -382,15 +413,12 @@ def normalize_search_url(permalink):
         return ""
 
     if permalink.startswith("//"):
-        return "https:" + permalink
+        permalink = "https:" + permalink
 
-    if permalink.startswith("http://") or permalink.startswith("https://"):
-        return permalink
+    if not permalink.startswith("http://") and not permalink.startswith("https://"):
+        permalink = BASE_URL + (permalink if permalink.startswith("/") else "/" + permalink)
 
-    if permalink.startswith("/"):
-        return BASE_URL + permalink
-
-    return BASE_URL + "/" + permalink
+    return fix_movie_url(permalink)
 
 
 def parse_typesense_hits(hits):
@@ -1123,7 +1151,7 @@ def save():
     if not title or not enc_url:
         return "Missing data", 400
 
-    url = decode_token(enc_url)
+    url = fix_movie_url(decode_token(enc_url))
 
     if not url.startswith("http://") and not url.startswith("https://"):
         return "Invalid URL", 400
@@ -1135,7 +1163,6 @@ def save():
     }
 
     return redirect("/?saved=1")
-
 
 @app.route("/remove/<path:title>")
 def remove(title):
@@ -1208,7 +1235,7 @@ def play():
     if not raw:
         return "Missing URL", 400
 
-    movie_url = decode_token(raw)
+    movie_url = fix_movie_url(decode_token(raw))
 
     if not movie_url.startswith("http://") and not movie_url.startswith("https://"):
         return "Invalid URL", 400
@@ -1225,9 +1252,12 @@ def play():
         return "No valid FSL 28800 or PixelDrain link found.", 404
 
     except Exception as e:
-        print(f"Play error: {e}")
-        return f"Error: {e}", 500
+        print(f"Play error for {movie_url}: {e}")
 
+        if "Name or service not known" in str(e) or "Max retries" in str(e):
+            return "Movie page ka domain resolve nahi hua (mirror dead). Dobara try karo.", 404
+
+        return f"Playback link generate nahi hua: {type(e).__name__}", 404
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
