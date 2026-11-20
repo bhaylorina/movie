@@ -803,9 +803,7 @@ def process_hubcloud(hubcloud_url):
                 break
         
         if generate_url:
-            # Fixed relative url to use hubcloud domain instead of BASE_URL
             generate_url = urljoin(hubcloud_url, generate_url)
-                
             resp2 = session.get(generate_url, timeout=15)
             html_text2 = resp2.text.replace('&amp;', '&').replace('\\u0026', '&').replace('\u0026', '&')
             fsl, pixel = extract_links(html_text2)
@@ -822,297 +820,81 @@ def get_best_link(url):
         resp.raise_for_status()
         soup = BeautifulSoup(resp.text, 'html.parser')
         download_links = []
+        
+        # 1. Link extraction from movie page (1080p/720p/480p)
         for a in soup.find_all('a', href=True):
             text = a.get_text(strip=True).lower()
-            if '1080p' in text and ('download' in text or 'hubcloud' in text or 'gadgets' in text or 'drive' in text):
+            if '1080p' in text and ('download' in text or 'hubcloud' in text or 'gadgets' in text or 'drive' in text or 'greenmotors' in text):
                 download_links.append(a['href'])
-            elif '720p' in text and ('download' in text or 'hubcloud' in text or 'gadgets' in text or 'drive' in text):
+            elif '720p' in text and ('download' in text or 'hubcloud' in text or 'gadgets' in text or 'drive' in text or 'greenmotors' in text):
                 download_links.append(a['href'])
-            elif '480p' in text and ('download' in text or 'hubcloud' in text or 'gadgets' in text or 'drive' in text):
+            elif '480p' in text and ('download' in text or 'hubcloud' in text or 'gadgets' in text or 'drive' in text or 'greenmotors' in text):
                 download_links.append(a['href'])
         
         if not download_links:
             for a in soup.find_all('a', href=True):
                 href = a['href']
-                if 'hubcloud' in href or 'gadgets' in href or 'drive' in href:
+                if any(x in href.lower() for x in ['hubcloud', 'gadgets', 'drive', 'greenmotors']):
                     download_links.append(href)
 
+        # 2. Process the found links directly
         if download_links:
             for dl in download_links:
-                if 'hubcloud' in dl.lower():
+                dl_low = dl.lower()
+                if 'hubcloud' in dl_low:
                     fsl, pixel = process_hubcloud(dl)
-                    if fsl or pixel:
-                        return fsl, pixel
-                elif 'gadgets' in dl.lower():
-                    hubcloud_url = extract_hubcloud_from_gadgets(dl)
-                    if hubcloud_url:
-                        fsl, pixel = process_hubcloud(hubcloud_url)
-                        if fsl or pixel:
-                            return fsl, pixel
-                elif 'hubdrive' in dl.lower():
-                    hubcloud_url = extract_hubcloud_from_hubdrive(dl)
-                    if hubcloud_url:
-                        fsl, pixel = process_hubcloud(hubcloud_url)
-                        if fsl or pixel:
-                            return fsl, pixel
+                    if fsl or pixel: return fsl, pixel
+                elif 'gadgets' in dl_low:
+                    hc = extract_hubcloud_from_gadgets(dl)
+                    if hc:
+                        fsl, pixel = process_hubcloud(hc)
+                        if fsl or pixel: return fsl, pixel
+                elif 'hubdrive' in dl_low:
+                    hc = extract_hubcloud_from_hubdrive(dl)
+                    if hc:
+                        fsl, pixel = process_hubcloud(hc)
+                        if fsl or pixel: return fsl, pixel
                 else:
+                    # Handle greenmotors and generic pages
                     resp2 = session.get(dl, timeout=15)
-                    html_text = resp2.text.replace('&amp;', '&').replace('\\u0026', '&').replace('\u0026', '&')
+                    html_text = resp2.text
+                    
+                    fsl, pixel = extract_links(html_text)
+                    if fsl or pixel: return fsl, pixel
                     
                     soup2 = BeautifulSoup(html_text, 'html.parser')
                     hc = None
                     for a2 in soup2.find_all('a', href=True):
-                        h = a2['href']
-                        if 'hubcloud' in h.lower():
-                            hc = h
+                        if 'hubcloud' in a2['href'].lower():
+                            hc = a2['href']
                             break
-                        elif 'gadgets' in h.lower():
-                            hc = extract_hubcloud_from_gadgets(h)
-                            if hc: break
-                        elif 'hubdrive' in h.lower():
-                            hc = extract_hubcloud_from_hubdrive(h)
-                            if hc: break
                     
                     if hc:
                         fsl, pixel = process_hubcloud(hc)
-                        if fsl or pixel:
-                            return fsl, pixel
-                            
-                    fsl, pixel = extract_links(html_text)
-                    if fsl or pixel:
-                        return fsl, pixel
-        
-        html_text = resp.text.replace('&amp;', '&').replace('\\u0026', '&').replace('\u0026', '&')
-        fsl, pixel = extract_links(html_text)
-        return fsl, pixel
-        
+                        if fsl or pixel: return fsl, pixel
+                    
+                    # Handle greenmotors CLICK TO CONTINUE form
+                    form = soup2.find('form')
+                    if form and form.get('action'):
+                        action_url = urljoin(dl, form.get('action'))
+                        data = {i.get('name'): i.get('value', '') for i in form.find_all('input') if i.get('name')}
+                        resp3 = session.post(action_url, data=data, timeout=15)
+                        
+                        fsl, pixel = extract_links(resp3.text)
+                        if fsl or pixel: return fsl, pixel
+                        
+                        soup3 = BeautifulSoup(resp3.text, 'html.parser')
+                        for a3 in soup3.find_all('a', href=True):
+                            if 'hubcloud' in a3['href'].lower():
+                                fsl, pixel = process_hubcloud(a3['href'])
+                                if fsl or pixel: return fsl, pixel
+
+        # 3. Fallback check on movie page
+        html_text = resp.text
+        return extract_links(html_text)
     except Exception as e:
         print(f"Error in get_best_link: {e}")
         return None, None
-
-
-@app.route("/")
-def home():
-    saved_msg = ""
-
-    if request.args.get("saved"):
-        saved_msg = '<div class="saved-msg">✅ Movie saved to playlist!</div>'
-
-    saved_html = ""
-    saved = get_valid_saved()
-
-    if saved:
-        for title in saved:
-            title_esc = html_lib.escape(title)
-            title_q = quote(title, safe="")
-            saved_html += (
-                f'<div class="saved-item">'
-                f'<span>{title_esc}</span>'
-                f'<a href="/remove/{title_q}" class="remove-btn">[Remove]</a>'
-                f'</div>'
-            )
-    else:
-        saved_html = '<p class="muted">No saved movies yet.</p>'
-
-    html_page = f"""
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <meta name="viewport" content="width=device-width, initial-scale=1">
-        <title>Movie Scraper</title>
-        <style>
-            body {{ font-family: Arial, sans-serif; padding: 20px; background: #121212; color: #fff; text-align: center; }}
-            input[type="text"] {{ padding: 10px; width: 80%; max-width: 300px; border-radius: 5px; border: none; }}
-            button {{ padding: 10px 20px; background: #007bff; color: white; border: none; border-radius: 5px; cursor: pointer; margin-top: 10px; font-weight: bold; }}
-            .link {{ margin-top: 30px; display: block; color: #28a745; font-weight: bold; text-decoration: none; }}
-            .saved-item {{ background: #1e1e1e; padding: 10px; margin-top: 5px; border-radius: 5px; display: flex; justify-content: space-between; align-items: center; font-size: 14px; }}
-            .remove-btn {{ color: #dc3545; text-decoration: none; font-weight: bold; }}
-            .saved-msg {{ color: #28a745; margin-bottom: 15px; font-weight: bold; }}
-            .muted {{ color: #aaa; font-size: 14px; }}
-        </style>
-    </head>
-    <body>
-        <h1>🎬 Movie Scraper</h1>
-        {saved_msg}
-        <form action="/search" method="get">
-            <input type="text" name="q" placeholder="Search for a movie..." required>
-            <button type="submit">Search</button>
-        </form>
-        <h3 style="margin-top:30px;">⭐ Saved Movies</h3>
-        {saved_html}
-        <a href="/playlist.m3u" class="link">📥 Download M3U Playlist</a>
-        <p style="margin-top: 20px; font-size: 12px; color: #666;">Saved movies expire after 3 days.</p>
-    </body>
-    </html>
-    """
-
-    return html_page
-
-
-@app.route("/search")
-def search():
-    query = request.args.get("q", "").strip()
-
-    if not query:
-        return redirect("/")
-
-    results = []
-    seen = set()
-
-    # 1. Typesense API
-    merge_results(results, seen, typesense_search(query))
-
-    # 2. WordPress native search fallback
-    if len(results) < 3:
-        merge_results(results, seen, wp_search(query))
-
-    # 3. Local cache last fallback
-    if not results:
-        merge_results(results, seen, local_search(query))
-
-    results_html = ""
-
-    for movie in results:
-        title = html_lib.escape(movie["title"])
-        token = movie.get("id") or encode_token(movie["url"])
-        title_q = quote(movie["title"], safe="")
-
-        results_html += f'''
-        <div class="movie-card">
-            <div class="movie-title">{title}</div>
-            <form action="/save" method="post" style="margin:0;">
-                <input type="hidden" name="title" value="{title_q}">
-                <input type="hidden" name="url" value="{token}">
-                <button type="submit" class="btn-save">Save</button>
-            </form>
-        </div>
-        '''
-
-    debug_html = ""
-
-    if not results:
-        debug_html = """
-        <div class="debug">
-            <p>❌ No movies found.</p>
-            <p class="muted">Site database me ye movie nahi mili. Spelling check karo ya dusra keyword try karo.</p>
-        </div>
-        """
-
-    query_esc = html_lib.escape(query)
-
-    html_page = f"""
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <meta name="viewport" content="width=device-width, initial-scale=1">
-        <title>Search Results</title>
-        <style>
-            body {{ font-family: Arial; padding: 20px; background: #121212; color: #fff; }}
-            .movie-card {{ background: #1e1e1e; padding: 15px; margin-top: 10px; border-radius: 5px; border-left: 4px solid #007bff; display: flex; justify-content: space-between; align-items: center; }}
-            .movie-title {{ font-size: 14px; font-weight: bold; max-width: 70%; }}
-            button {{ padding: 8px 15px; background: #28a745; color: white; border: none; border-radius: 5px; cursor: pointer; font-weight: bold; }}
-            a {{ color: #ddd; text-decoration: none; font-size: 14px; }}
-            .debug {{ background: #333; padding: 15px; border-radius: 5px; margin-top: 15px; text-align: left; }}
-            .muted {{ font-size: 12px; color: #aaa; }}
-        </style>
-    </head>
-    <body>
-        <a href="/">⬅ Back to Home</a>
-        <h3>Search Results for: "{query_esc}"</h3>
-        {results_html}
-        {debug_html}
-    </body>
-    </html>
-    """
-
-    return html_page
-
-
-@app.route("/save", methods=["POST"])
-def save():
-    title = unquote(request.form.get("title", "")).strip()
-    enc_url = request.form.get("url", "").strip()
-
-    if not title or not enc_url:
-        return "Missing data", 400
-
-    url = fix_movie_url(decode_token(enc_url))
-
-    if not url.startswith("http://") and not url.startswith("https://"):
-        return "Invalid URL", 400
-
-    saved_movies[title] = {
-        "title": title,
-        "url": url,
-        "saved_at": time.time(),
-    }
-
-    return redirect("/?saved=1")
-
-@app.route("/remove/<path:title>")
-def remove(title):
-    title = unquote(title)
-    saved_movies.pop(title, None)
-    return redirect("/")
-
-
-def m3u_text(value):
-    return str(value or "").replace("\r", " ").replace("\n", " ").strip()
-
-
-@app.route("/playlist.m3u")
-def playlist():
-    movies = fetch_latest_movies()
-
-    m3u_lines = ["#EXTM3U"]
-    added_urls = set()
-
-    def add_category(display_name, category_key):
-        for movie in movies:
-            if movie.get("category") != category_key:
-                continue
-
-            title = m3u_text(movie.get("title", ""))
-            url = movie.get("url", "").strip()
-
-            if not title or not url:
-                continue
-
-            # Sirf 2025 / 2026 movies
-            if not re.search(r"\((2025|2026)\)", title):
-                continue
-
-            if url in added_urls:
-                continue
-
-            added_urls.add(url)
-            enc = quote(url, safe="")
-            play_url = f"{request.url_root.rstrip('/')}/play?url={enc}"
-
-            m3u_lines.append(f'#EXTINF:-1 group-title="{display_name}",{title}')
-            m3u_lines.append(play_url)
-
-    # Folder header channel nahi banega
-    add_category("Bollywood Movies", "bollywood-movies")
-    add_category("South Hindi Movies", "south-hindi-movies")
-
-    # Saved movies (Bypassing added_urls so duplicates are forced into Saved folder)
-    saved_added_urls = set()
-    for title, data in get_valid_saved().items():
-        url = (data.get("url") or "").strip()
-
-        if not url or url in saved_added_urls:
-            continue
-
-        saved_added_urls.add(url)
-        enc = quote(url, safe="")
-        play_url = f"{request.url_root.rstrip('/')}/play?url={enc}"
-
-        m3u_lines.append(f'#EXTINF:-1 group-title="⭐ Saved Movies",{m3u_text(title)}')
-        m3u_lines.append(play_url)
-
-    return "\n".join(m3u_lines), 200, {"Content-Type": "audio/x-mpegurl"}
-
 
 @app.route("/play")
 def play():
@@ -1139,10 +921,6 @@ def play():
 
     except Exception as e:
         print(f"Play error for {movie_url}: {e}")
-
-        if "Name or service not known" in str(e) or "Max retries" in str(e):
-            return "Movie page ka domain resolve nahi hua (mirror dead). Dobara try karo.", 404
-
         return f"Playback link generate nahi hua: {type(e).__name__}", 404
 
 if __name__ == "__main__":
