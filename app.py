@@ -13,7 +13,9 @@ app = Flask(__name__)
 
 BASE_URL = "https://new15.hdhub4u.cl"
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Origin": BASE_URL,
+    "Referer": BASE_URL + "/"
 }
 
 session = requests.Session()
@@ -71,7 +73,7 @@ def fetch_latest_movies():
     categories = ['bollywood-movies', 'south-hindi-movies']
     
     for cat in categories:
-        for page in range(1, 4):  # 3 pages tak fetch karenge
+        for page in range(1, 4): 
             url = f"{BASE_URL}/category/{cat}/" if page == 1 else f"{BASE_URL}/category/{cat}/page/{page}/"
             try:
                 resp = session.get(url, timeout=15)
@@ -188,15 +190,15 @@ def search():
     results = []
     seen = set()
     
-    # Website ka asli API endpoint (Typesense)
+    # --- 1. Typesense API (Fast, but sometimes misses older movies) ---
     today = datetime.date.today().isoformat()
     api_url = "https://search.pingora.fyi/collections/post/documents/search"
     params = {
         'q': query,
         'query_by': 'post_title,category,stars,director,imdb_id',
         'query_by_weights': '4,2,2,2,4',
-        'sort_by': 'sort_by_date:desc',
-        'limit': 30,
+        'sort_by': '_text_match:desc,sort_by_date:desc', # Text match first, then date
+        'per_page': 50,
         'highlight_fields': 'none',
         'use_cache': 'true',
         'page': 1,
@@ -223,16 +225,38 @@ def search():
                 if path in seen:
                     continue
                 seen.add(path)
-                
                 results.append({
                     'title': title,
                     'url': path,
                     'id': base64.urlsafe_b64encode(path.encode()).decode()
                 })
     except Exception as e:
-        print(f"API Error: {e}")
-        
-    # Fallback (local cache)
+        print(f"Typesense API Error: {e}")
+
+    # --- 2. WordPress Native Search API (Finds older movies) ---
+    if len(results) < 3: # Agar Typesense se kam results aaye, to WP database check karo
+        try:
+            wp_url = f"{BASE_URL}/wp-json/wp/v2/search"
+            wp_params = {'search': query, 'per_page': 50}
+            wp_resp = session.get(wp_url, params=wp_params, timeout=15)
+            if wp_resp.status_code == 200:
+                for item in wp_resp.json():
+                    title = item.get('title', '')
+                    url = item.get('url', '')
+                    if not title or not url:
+                        continue
+                    if url in seen:
+                        continue
+                    seen.add(url)
+                    results.append({
+                        'title': title,
+                        'url': url,
+                        'id': base64.urlsafe_b64encode(url.encode()).decode()
+                    })
+        except Exception as e:
+            print(f"WP API Error: {e}")
+
+    # --- 3. Fallback to Local Cache ---
     if not results:
         movies = fetch_latest_movies()
         query_lower = query.lower()
@@ -242,6 +266,7 @@ def search():
                     seen.add(m['url'])
                     results.append(m)
 
+    # --- RENDER RESULTS ---
     results_html = ""
     for movie in results:
         enc_url = movie['id']
@@ -260,7 +285,7 @@ def search():
         debug_html = f"""
         <div style="background:#333; padding:15px; border-radius:5px; margin-top:15px; text-align:left;">
             <p>❌ Yeh movie nahi mili.</p>
-            <p style="font-size:12px; color:#aaa;">Try searching a different keyword. Make sure spelling is correct.</p>
+            <p style="font-size:12px; color:#aaa;">Site ke database me ye movie nahi mili. Spelling check karo ya koi aur keyword try karo.</p>
         </div>
         """
     else:
@@ -328,7 +353,6 @@ def playlist():
             m3u_lines.append(f'#EXTINF:-1,{m["title"]}')
             m3u_lines.append(play_url)
             
-    # 2025 aur 2026 wali movies filter
     bolly = [m for m in main_cache["data"] if m.get('category') == 'bollywood-movies' and ('2025' in m['title'] or '2026' in m['title'])]
     south = [m for m in main_cache["data"] if m.get('category') == 'south-hindi-movies' and ('2025' in m['title'] or '2026' in m['title'])]
     
