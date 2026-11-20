@@ -254,7 +254,7 @@ def search():
     query = request.args.get('q', '').strip()
     if not query: return redirect('/')
     
-    search_url = f"{BASE_URL}/?s={urllib.parse.quote(query)}"
+    search_url = f"{BASE_URL}/search.html?q={urllib.parse.quote(query)}"
     try:
         resp = session.get(search_url, timeout=15)
         soup = BeautifulSoup(resp.text, 'html.parser')
