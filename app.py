@@ -758,253 +758,137 @@ def find_hubcloud_link(html_text, base_url):
 
 def extract_hubcloud_from_gadgets(url):
     try:
-        page = fetch_page(url)
-    except Exception as e:
-        print(f"Gadgets fetch error: {e}")
+        resp = session.get(url, timeout=15)
+        soup = BeautifulSoup(resp.text, 'html.parser')
+        for a in soup.find_all('a', href=True):
+            if 'hubcloud' in a['href'].lower():
+                return a['href']
         return None
-
-    for _, link in candidate_links(page, url):
-        if "hubcloud" in link.lower():
-            return link
-
-    for _, link in candidate_links(page, url):
-        if "hubdrive" in link.lower():
-            hc = extract_hubcloud_from_hubdrive(link)
-            if hc:
-                return hc
-
-    return None
-
+    except:
+        return None
 
 def extract_hubcloud_from_hubdrive(url):
     try:
-        page = fetch_page(url)
-    except Exception as e:
-        print(f"HubDrive fetch error: {e}")
+        resp = session.get(url, timeout=15)
+        soup = BeautifulSoup(resp.text, 'html.parser')
+        for a in soup.find_all('a', href=True):
+            h = a['href']
+            if 'hubcloud' in h.lower():
+                return h
+        return None
+    except:
         return None
 
-    for _, link in candidate_links(page, url):
-        if "hubcloud" in link.lower():
-            return link
-
-    return None
-
-
 def process_hubcloud(hubcloud_url):
-    if not hubcloud_url:
-        return None, None
-
     try:
-        page = fetch_page(hubcloud_url)
-    except Exception as e:
-        print(f"HubCloud fetch error: {e}")
-        return None, None
-
-    fsl, pixel = extract_links(page)
-
-    if fsl or pixel:
-        return fsl, pixel
-
-    text = normalize_html(page)
-    soup = BeautifulSoup(text, "html.parser")
-
-    generate_urls = []
-    seen_urls = set()
-
-    def add_url(u, base=hubcloud_url):
-        if not u:
-            return
-
-        full = urljoin(base, u.strip())
-        full = trim_url(full)
-
-        if not full.startswith("http"):
-            return
-
-        low = full.lower()
-
-        if any(x in low for x in ("t3apac", "fslv2", "negn6f")):
-            return
-
-        if full not in seen_urls:
-            seen_urls.add(full)
-            generate_urls.append(full)
-
-    for a in soup.find_all("a", href=True):
-        label = (
-            a.get_text(" ", strip=True)
-            + " "
-            + (a.get("title") or "")
-        ).lower()
-
-        href = a.get("href") or ""
-
-        if (
-            ("generate" in label and "download" in label)
-            or ("direct" in label and "download" in label)
-            or ("download" in label and "link" in label)
-        ):
-            add_url(href)
-
-    for match in re.findall(r'href=["\']([^"\']+)["\']', text, re.I):
-        low = match.lower()
-        if "generate" in low or "download" in low or "drive" in low:
-            add_url(match)
-
-    for match in re.findall(
-        r'(?:location\.href|window\.location|window\.open)\s*=\s*["\']([^"\']+)["\']',
-        text,
-        re.I,
-    ):
-        add_url(match)
-
-    for match in re.findall(r'window\.open\s*\(\s*["\']([^"\']+)["\']', text, re.I):
-        add_url(match)
-
-    for match in re.findall(r'["\']([^"\']*(?:generate|download|drive)[^"\']*)["\']', text, re.I):
-        if match.startswith("/") or match.startswith("http"):
-            add_url(match)
-
-    form_pages = []
-
-    for form in soup.find_all("form"):
-        action = form.get("action") or hubcloud_url
-        action = urljoin(hubcloud_url, action)
-        method = (form.get("method") or "get").lower()
-
-        data = {}
-        for inp in form.find_all("input"):
-            name = inp.get("name")
-            if name:
-                data[name] = inp.get("value", "")
-
-        form_label = form.get_text(" ", strip=True).lower()
-        action_low = action.lower()
-
-        if (
-            "generate" in form_label
-            or "download" in form_label
-            or "drive" in form_label
-            or "generate" in action_low
-            or "download" in action_low
-            or "drive" in action_low
-        ):
-            if method == "post":
-                form_pages.append(("post", action, data))
-            else:
-                form_pages.append(("get", action, data))
-
-    for gen_url in generate_urls[:4]:
-        try:
-            page2 = fetch_page(gen_url)
-            fsl, pixel = extract_links(page2)
-
+        resp = session.get(hubcloud_url, timeout=15)
+        html_text = resp.text.replace('&amp;', '&').replace('\\u0026', '&').replace('\u0026', '&')
+        
+        fsl, pixel = extract_links(html_text)
+        if fsl or pixel:
+            return fsl, pixel
+            
+        soup = BeautifulSoup(html_text, 'html.parser')
+        generate_url = None
+        for a in soup.find_all('a', href=True):
+            text = a.get_text(strip=True).lower()
+            if 'generate' in text and 'download' in text:
+                generate_url = a['href']
+                break
+            elif 'direct' in text and 'download' in text:
+                generate_url = a['href']
+                break
+            elif 'download' in text and 'link' in text:
+                generate_url = a['href']
+                break
+        
+        if generate_url:
+            # Fixed relative url to use hubcloud domain instead of BASE_URL
+            generate_url = urljoin(hubcloud_url, generate_url)
+                
+            resp2 = session.get(generate_url, timeout=15)
+            html_text2 = resp2.text.replace('&amp;', '&').replace('\\u0026', '&').replace('\u0026', '&')
+            fsl, pixel = extract_links(html_text2)
             if fsl or pixel:
                 return fsl, pixel
+                
+        return None, None
+    except:
+        return None, None
 
-            for _, next_url in candidate_links(page2, gen_url)[:3]:
-                try:
-                    page3 = fetch_page(next_url)
-                    fsl, pixel = extract_links(page3)
+def get_best_link(url):
+    try:
+        resp = session.get(url, timeout=15)
+        resp.raise_for_status()
+        soup = BeautifulSoup(resp.text, 'html.parser')
+        download_links = []
+        for a in soup.find_all('a', href=True):
+            text = a.get_text(strip=True).lower()
+            if '1080p' in text and ('download' in text or 'hubcloud' in text or 'gadgets' in text or 'drive' in text):
+                download_links.append(a['href'])
+            elif '720p' in text and ('download' in text or 'hubcloud' in text or 'gadgets' in text or 'drive' in text):
+                download_links.append(a['href'])
+            elif '480p' in text and ('download' in text or 'hubcloud' in text or 'gadgets' in text or 'drive' in text):
+                download_links.append(a['href'])
+        
+        if not download_links:
+            for a in soup.find_all('a', href=True):
+                href = a['href']
+                if 'hubcloud' in href or 'gadgets' in href or 'drive' in href:
+                    download_links.append(href)
 
+        if download_links:
+            for dl in download_links:
+                if 'hubcloud' in dl.lower():
+                    fsl, pixel = process_hubcloud(dl)
                     if fsl or pixel:
                         return fsl, pixel
-
-                except Exception:
-                    pass
-
-        except Exception as e:
-            print(f"HubCloud follow error: {e}")
-
-    for method, action, data in form_pages[:3]:
-        try:
-            if method == "post":
-                page2 = post_form(action, data)
-            else:
-                sep = "&" if "?" in action else "?"
-                page2 = fetch_page(action + sep + urlencode(data))
-
-            fsl, pixel = extract_links(page2)
-
-            if fsl or pixel:
-                return fsl, pixel
-
-        except Exception as e:
-            print(f"HubCloud form error: {e}")
-
-    return None, None
-
-
-def resolve_candidate(url, depth=0, deadline=None):
-    if deadline is None:
-        deadline = time.time() + 25
-
-    if depth > 2 or time.time() > deadline:
-        return None, None
-
-    low = url.lower()
-
-    try:
-        if "hubcloud" in low:
-            return process_hubcloud(url)
-
-        if "gadgetsweb" in low:
-            hc = extract_hubcloud_from_gadgets(url)
-            return process_hubcloud(hc) if hc else (None, None)
-
-        if "hubdrive" in low:
-            hc = extract_hubcloud_from_hubdrive(url)
-            return process_hubcloud(hc) if hc else (None, None)
-
-        page = fetch_page(url)
-
-        fsl, pixel = extract_links(page)
-
-        if fsl or pixel:
-            return fsl, pixel
-
-        hc = find_hubcloud_link(page, url)
-
-        if hc:
-            fsl, pixel = resolve_candidate(hc, depth + 1, deadline)
-            if fsl or pixel:
-                return fsl, pixel
-
-        for _, next_url in candidate_links(page, url)[:3]:
-            if next_url == url:
-                continue
-
-            fsl, pixel = resolve_candidate(next_url, depth + 1, deadline)
-
-            if fsl or pixel:
-                return fsl, pixel
-
-    except Exception as e:
-        print(f"resolve_candidate error {url}: {e}")
-
-    return None, None
-
-
-def get_best_link(movie_url):
-    page = fetch_page(movie_url)
-
-    fsl, pixel = extract_links(page)
-
-    if fsl or pixel:
+                elif 'gadgets' in dl.lower():
+                    hubcloud_url = extract_hubcloud_from_gadgets(dl)
+                    if hubcloud_url:
+                        fsl, pixel = process_hubcloud(hubcloud_url)
+                        if fsl or pixel:
+                            return fsl, pixel
+                elif 'hubdrive' in dl.lower():
+                    hubcloud_url = extract_hubcloud_from_hubdrive(dl)
+                    if hubcloud_url:
+                        fsl, pixel = process_hubcloud(hubcloud_url)
+                        if fsl or pixel:
+                            return fsl, pixel
+                else:
+                    resp2 = session.get(dl, timeout=15)
+                    html_text = resp2.text.replace('&amp;', '&').replace('\\u0026', '&').replace('\u0026', '&')
+                    
+                    soup2 = BeautifulSoup(html_text, 'html.parser')
+                    hc = None
+                    for a2 in soup2.find_all('a', href=True):
+                        h = a2['href']
+                        if 'hubcloud' in h.lower():
+                            hc = h
+                            break
+                        elif 'gadgets' in h.lower():
+                            hc = extract_hubcloud_from_gadgets(h)
+                            if hc: break
+                        elif 'hubdrive' in h.lower():
+                            hc = extract_hubcloud_from_hubdrive(h)
+                            if hc: break
+                    
+                    if hc:
+                        fsl, pixel = process_hubcloud(hc)
+                        if fsl or pixel:
+                            return fsl, pixel
+                            
+                    fsl, pixel = extract_links(html_text)
+                    if fsl or pixel:
+                        return fsl, pixel
+        
+        html_text = resp.text.replace('&amp;', '&').replace('\\u0026', '&').replace('\u0026', '&')
+        fsl, pixel = extract_links(html_text)
         return fsl, pixel
-
-    deadline = time.time() + 25
-
-    for _, link in candidate_links(page, movie_url)[:8]:
-        if link == movie_url:
-            continue
-
-        fsl, pixel = resolve_candidate(link, 0, deadline)
-
-        if fsl or pixel:
-            return fsl, pixel
-
-    return None, None
+        
+    except Exception as e:
+        print(f"Error in get_best_link: {e}")
+        return None, None
 
 
 @app.route("/")
@@ -1212,14 +1096,15 @@ def playlist():
     add_category("Bollywood Movies", "bollywood-movies")
     add_category("South Hindi Movies", "south-hindi-movies")
 
-    # Saved movies
+    # Saved movies (Bypassing added_urls so duplicates are forced into Saved folder)
+    saved_added_urls = set()
     for title, data in get_valid_saved().items():
         url = (data.get("url") or "").strip()
 
-        if not url or url in added_urls:
+        if not url or url in saved_added_urls:
             continue
 
-        added_urls.add(url)
+        saved_added_urls.add(url)
         enc = quote(url, safe="")
         play_url = f"{request.url_root.rstrip('/')}/play?url={enc}"
 
