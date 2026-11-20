@@ -254,21 +254,44 @@ def search():
     query = request.args.get('q', '').strip()
     if not query: return redirect('/')
     
-    search_url = f"{BASE_URL}/search.html?q={urllib.parse.quote(query)}"
+    # Space ki jagah + use karne ke liye quote_plus kiya
+    search_url = f"{BASE_URL}/search.html?q={urllib.parse.quote_plus(query)}"
+    print(f"[*] Searching: {search_url}")
+    
     try:
         resp = session.get(search_url, timeout=15)
         soup = BeautifulSoup(resp.text, 'html.parser')
         
         seen = set()
         results_html = ""
+        
+        # Search page ke liye relaxed filter
         for a_tag in soup.find_all('a', href=True):
-            res = parse_movie_tag(a_tag)
-            if not res: continue
-            title, href = res
-            if href in seen: continue
+            title = a_tag.get_text(strip=True)
+            href = a_tag.get('href')
+            
+            # Basic validation (Search me title chota ho sakta hai, isliye len > 5)
+            if not href or not title or len(title) < 5: 
+                continue
+                
+            if not href.startswith('http'): 
+                href = BASE_URL + href
+                
+            if BASE_URL not in href: 
+                continue
+                
+            # Category/Page/Home links ko ignore karo
+            if '/category/' in href or '/page/' in href or 'search.html' in href or 'how-to-download' in href: 
+                continue
+                
+            exclude = ["season", "ep-", "episode", "series", "s01", "s02", "how to download", "telegram", "play"]
+            if any(kw in title.lower() for kw in exclude): 
+                continue
+            
+            if href in seen: 
+                continue
             seen.add(href)
             
-            # Encode href to pass safely in form
             enc_url = base64.urlsafe_b64encode(href.encode()).decode()
             
             results_html += f"""
@@ -279,6 +302,17 @@ def search():
                     <input type="hidden" name="url" value="{enc_url}">
                     <button type="submit" class="btn-save">Save</button>
                 </form>
+            </div>
+            """
+            
+        # 🛑 DEBUG MAGIC: Agar list khali hai toh HTML show karo
+        if not results_html:
+            results_html = f"""
+            <div style="background:#333; padding:15px; border-radius:5px;">
+                <p>❌ No movies matched the filter.</p>
+                <p><b>Status Code:</b> {resp.status_code}</p>
+                <p><b>Debug HTML Preview (Screenshot bhej dena iska):</b></p>
+                <textarea style="width:100%; height:200px; background:#000; color:#0f0; font-size:12px;">{resp.text[:3000]}</textarea>
             </div>
             """
             
@@ -299,7 +333,7 @@ def search():
         <body>
             <a href="/">⬅ Back to Home</a>
             <h3>Search Results for: "{query}"</h3>
-            {results_html if results_html else "<p>No movies found.</p>"}
+            {results_html}
         </body>
         </html>
         """
