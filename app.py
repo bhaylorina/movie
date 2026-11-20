@@ -25,7 +25,7 @@ session.headers.update({
     'Accept-Language': 'en-US,en;q=0.5',
 })
 
-# 🛑 नया: सर्च API के लिए अलग सेशन और हेडर्स
+# सर्च API के लिए अलग सेशन और हेडर्स
 API_HEADERS = {
     "User-Agent": UA,
     "Accept": "application/json, text/plain, */*",
@@ -131,11 +131,21 @@ def extract_hubcloud_from_hubdrive(url):
         pass
     return None
 
+# 🛑 यहाँ नया गेमड्राइव बायपास लॉजिक जोड़ा गया है
 def convert_pixeldrain_to_direct(url):
-    url = url.replace('pixeldrain.com', 'pixeldrain.dev')
-    if "pixeldrain.dev/u/" in url:
-        file_id = url.split("/u/")[-1].split("?")[0]
-        return f"https://pixeldrain.dev/api/file/{file_id}?download"
+    if not url:
+        return None
+        
+    url = url.replace('&amp;', '&')
+    
+    # GameDrive Bypass Regex
+    match = re.search(r'https?://(?:pixeldra\.in|pixeldrain\.com|pixeldrain\.net|pixeldrain\.dev)/(?:u|api/file|l)/([^?\s]+)', url)
+    if match:
+        file_id = match.group(1)
+        direct_url = f"https://cdn.pixeldrain.eu.cc/{file_id}"
+        print(f"      [🔄] Converted PixelDrain (GameDrive): {direct_url}")
+        return direct_url
+        
     return url
 
 def process_hubcloud(hubcloud_url):
@@ -228,7 +238,7 @@ def process_hubcloud(hubcloud_url):
     return None
 
 
-# ================= 🛑 नया: बेहतर सर्च फंक्शन्स =================
+# ================= सर्च और सेव फंक्शन्स =================
 
 def get_valid_saved():
     now = time.time()
@@ -259,8 +269,6 @@ def typesense_search(query):
         "query_by_weights": "4,2,2,2,4", "sort_by": "_text_match:desc,sort_by_date:desc",
         "per_page": 50, "highlight_fields": "none", "use_cache": "true", "page": 1, "analytics_tag": today
     }
-    
-    # हम पहले api_session (requests) ट्राई करेंगे, फिर base session (curl_cffi)
     for client in (api_session, session):
         try:
             resp = client.get(api_url, params=params, timeout=10)
@@ -274,8 +282,7 @@ def typesense_search(query):
                     if title and permalink:
                         url = fix_movie_url(permalink)
                         results.append({"title": title, "url": url})
-                if results:
-                    return results
+                if results: return results
         except Exception as e:
             print(f"Typesense error: {e}")
     return []
@@ -293,8 +300,7 @@ def wp_search(query):
                     url = item.get("url", "")
                     if title and url:
                         results.append({"title": title, "url": fix_movie_url(url)})
-                if results:
-                    return results
+                if results: return results
         except Exception as e:
             print(f"WP error: {e}")
     return []
@@ -340,10 +346,8 @@ def search():
     query = request.args.get("q", "").strip()
     if not query: return redirect("/")
     
-    # पहले Typesense, फिर WP Search
     results = typesense_search(query)
-    if not results:
-        results = wp_search(query)
+    if not results: results = wp_search(query)
     
     results_html = ""
     for movie in results:
