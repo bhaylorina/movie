@@ -3,6 +3,8 @@ import re
 import time
 import base64
 import urllib.parse
+import datetime
+from urllib.parse import urlparse
 from flask import Flask, request, redirect, render_template_string
 from bs4 import BeautifulSoup
 import requests
@@ -38,18 +40,20 @@ def parse_movie_tag(a_tag):
     if not href or not title:
         return None
     href = clean_url(href)
-    if href.rstrip('/') == BASE_URL.rstrip('/'):
+    if href.rstrip('/') == BASE_URL.rstrip('/') or len(title) < 3:
         return None
+        
     exclude_kw = [
         "season", "ep-", "episode", "series", "s01", "s02",
         "how to download", "telegram", "play", "home", "homepage",
         "back to", "go to", "next", "previous", "join", "contact",
-        "dmca", "privacy", "about"
+        "dmca", "privacy", "about", "menu"
     ]
     if any(kw in title.lower() for kw in exclude_kw):
         return None
-    if 'category' in href or 'search' in href or 'how-to-download' in href or '/play/' in href:
+    if 'category' in href or 'search' in href or 'how-to-download' in href or '/play/' in href or '/page/' in href:
         return None
+        
     return {
         'title': title,
         'url': href,
@@ -67,17 +71,15 @@ def fetch_latest_movies():
     categories = ['bollywood-movies', 'south-hindi-movies']
     
     for cat in categories:
-        for page in range(1, 3):  # first 2 pages
+        for page in range(1, 4):  # 3 pages tak fetch karenge
             url = f"{BASE_URL}/category/{cat}/" if page == 1 else f"{BASE_URL}/category/{cat}/page/{page}/"
             try:
-                resp = session.get(url, timeout=12)
+                resp = session.get(url, timeout=15)
                 resp.raise_for_status()
                 soup = BeautifulSoup(resp.text, 'html.parser')
                 for a_tag in soup.find_all('a', href=True):
                     movie = parse_movie_tag(a_tag)
                     if not movie:
-                        continue
-                    if not ('2025' in movie['title'] or '2026' in movie['title']):
                         continue
                     if movie['url'] in seen:
                         continue
@@ -92,18 +94,14 @@ def fetch_latest_movies():
         main_cache["data"] = movies
         main_cache["last_update"] = now
         print(f"Cache refreshed with {len(movies)} movies.")
-    else:
-        print("No movies found, keeping old cache.")
     return main_cache["data"]
 
 def extract_links(html_text):
-    # Direct FSL
     for match in re.findall(r'https://[^\s"\'<>]+', html_text):
         if 'r2.cloudflarestorage.com' in match and 'X-Amz-Expires=28800' in match:
             if 't3apac' not in match and 'fslv2' not in match and 'negn6f' not in match:
                 return match, None
 
-    # Direct Pixel
     for match in re.findall(r'https://pixeldrain\.(?:dev|com)/[^\s"\'<>]+', html_text):
         if 'negn6f' in match:
             continue
@@ -111,7 +109,6 @@ def extract_links(html_text):
         if pix_id and pix_id not in ['api', 'file']:
             return None, f"https://pixeldrain.dev/api/file/{pix_id}?download"
 
-    # Deep search: FSL
     b64_matches = re.findall(r'[A-Za-z0-9+/=_-]{40,}', html_text)
     for b64 in b64_matches:
         try:
@@ -124,18 +121,6 @@ def extract_links(html_text):
                             match = re.search(r'https://[^\s"\'<>]+', decoded)
                             if match:
                                 return match.group(0), None
-                except:
-                    pass
-        except:
-            pass
-
-    # Deep search: Pixel
-    for b64 in b64_matches:
-        try:
-            padded = b64 + '=' * (-len(b64) % 4)
-            for func in [base64.b64decode, base64.urlsafe_b64decode]:
-                try:
-                    decoded = func(padded).decode('utf-8', errors='ignore')
                     if 'pixeldrain' in decoded:
                         match = re.search(r'https://pixeldrain\.[^\s"\'<>]+', decoded)
                         if match:
@@ -199,63 +184,67 @@ def search():
     query = request.args.get('q', '').strip()
     if not query:
         return redirect('/')
-    movies = fetch_latest_movies()
-    query_lower = query.lower()
-    results = [m for m in movies if query_lower in m['title'].lower()]
-    debug_html = ""
-
-    if not results:
-        # Fallback to site search
-        search_url = f"{BASE_URL}/search.html?q={urllib.parse.quote_plus(query)}"
-        try:
-            resp = session.get(search_url, timeout=12)
-            soup = BeautifulSoup(resp.text, 'html.parser')
-            seen_urls = set()
-            exclude_kw = [
-                "season", "ep-", "episode", "series", "s01", "s02",
-                "how to download", "telegram", "play", "home", "homepage",
-                "back to", "go to", "next", "previous", "join", "contact",
-                "dmca", "privacy", "about"
-            ]
-            for a_tag in soup.find_all('a', href=True):
-                title = a_tag.get_text(strip=True)
-                href = a_tag.get('href', '')
-                if not href or not title or len(title) < 5:
+        
+    results = []
+    seen = set()
+    
+    # Website ka asli API endpoint (Typesense)
+    today = datetime.date.today().isoformat()
+    api_url = "https://search.pingora.fyi/collections/post/documents/search"
+    params = {
+        'q': query,
+        'query_by': 'post_title,category,stars,director,imdb_id',
+        'query_by_weights': '4,2,2,2,4',
+        'sort_by': 'sort_by_date:desc',
+        'limit': 30,
+        'highlight_fields': 'none',
+        'use_cache': 'true',
+        'page': 1,
+        'analytics_tag': today
+    }
+    
+    try:
+        resp = session.get(api_url, params=params, timeout=15)
+        if resp.status_code == 200:
+            data = resp.json()
+            for hit in data.get('hits', []):
+                doc = hit.get('document', {})
+                title = doc.get('post_title', '')
+                permalink = doc.get('permalink', '')
+                
+                if not title or not permalink:
                     continue
-                if href.rstrip('/') == BASE_URL.rstrip('/'):
+                    
+                parsed = urlparse(permalink)
+                path = parsed.path if parsed.scheme else permalink
+                if not path.startswith('http'):
+                    path = BASE_URL + path
+                
+                if path in seen:
                     continue
-                if not href.startswith('http'):
-                    href = BASE_URL + href
-                if BASE_URL not in href:
-                    continue
-                if '/category/' in href or '/page/' in href or 'search.html' in href or 'how-to-download' in href:
-                    continue
-                if any(kw in title.lower() for kw in exclude_kw):
-                    continue
-                if href in seen_urls:
-                    continue
-                seen_urls.add(href)
+                seen.add(path)
+                
                 results.append({
                     'title': title,
-                    'url': href,
-                    'id': base64.urlsafe_b64encode(href.encode()).decode()
+                    'url': path,
+                    'id': base64.urlsafe_b64encode(path.encode()).decode()
                 })
-            if not results:
-                debug_html = f"""
-                <div style="background:#333; padding:15px; border-radius:5px; margin-top:15px; text-align:left;">
-                    <p>❌ No movies found.</p>
-                    <p><b>Local cache size:</b> {len(movies)}</p>
-                    <p><b>Status Code:</b> {resp.status_code}</p>
-                    <p><b>Debug HTML (first 1200 chars):</b></p>
-                    <textarea style="width:100%; height:120px; background:#000; color:#0f0; font-size:11px;">{resp.text[:1200]}</textarea>
-                </div>
-                """
-        except Exception as e:
-            debug_html = f"<p style='color:red;'>Search fallback error: {e}</p>"
+    except Exception as e:
+        print(f"API Error: {e}")
+        
+    # Fallback (local cache)
+    if not results:
+        movies = fetch_latest_movies()
+        query_lower = query.lower()
+        for m in movies:
+            if query_lower in m['title'].lower():
+                if m['url'] not in seen:
+                    seen.add(m['url'])
+                    results.append(m)
 
     results_html = ""
     for movie in results:
-        enc_url = base64.urlsafe_b64encode(movie['url'].encode()).decode()
+        enc_url = movie['id']
         results_html += f"""
         <div class="movie-card">
             <div class="movie-title">{movie['title']}</div>
@@ -266,8 +255,16 @@ def search():
             </form>
         </div>
         """
-    if not results_html and not debug_html:
-        debug_html = "<p>❌ No movies found for this search.</p>"
+        
+    if not results_html:
+        debug_html = f"""
+        <div style="background:#333; padding:15px; border-radius:5px; margin-top:15px; text-align:left;">
+            <p>❌ Yeh movie nahi mili.</p>
+            <p style="font-size:12px; color:#aaa;">Try searching a different keyword. Make sure spelling is correct.</p>
+        </div>
+        """
+    else:
+        debug_html = ""
 
     html = f"""
     <!DOCTYPE html>
@@ -320,17 +317,21 @@ def remove(title):
 def playlist():
     fetch_latest_movies()
     m3u_lines = ["#EXTM3U"]
+    
     def add_category(name, movies):
         if not movies:
             return
         m3u_lines.append(f'#EXTINF:-1 group-title="{name}",{name}')
         for m in movies:
-            enc_url = base64.urlsafe_b64encode(m['url'].encode()).decode()
+            enc_url = m['id']
             play_url = f"{request.host_url}play?url={enc_url}"
             m3u_lines.append(f'#EXTINF:-1,{m["title"]}')
             m3u_lines.append(play_url)
-    bolly = [m for m in main_cache["data"] if m.get('category') == 'bollywood-movies']
-    south = [m for m in main_cache["data"] if m.get('category') == 'south-hindi-movies']
+            
+    # 2025 aur 2026 wali movies filter
+    bolly = [m for m in main_cache["data"] if m.get('category') == 'bollywood-movies' and ('2025' in m['title'] or '2026' in m['title'])]
+    south = [m for m in main_cache["data"] if m.get('category') == 'south-hindi-movies' and ('2025' in m['title'] or '2026' in m['title'])]
+    
     add_category("Bollywood Movies", bolly)
     add_category("South Hindi Movies", south)
 
@@ -341,6 +342,7 @@ def playlist():
             del saved_movies[title]
         else:
             safe_saved[title] = data
+            
     if safe_saved:
         m3u_lines.append('#EXTINF:-1 group-title="⭐ Saved Movies",⭐ Saved Movies')
         for title, data in safe_saved.items():
@@ -348,6 +350,7 @@ def playlist():
             play_url = f"{request.host_url}play?url={enc_url}"
             m3u_lines.append(f'#EXTINF:-1,{title}')
             m3u_lines.append(play_url)
+            
     return "\n".join(m3u_lines), 200, {'Content-Type': 'audio/x-mpegurl'}
 
 @app.route('/play')
@@ -364,6 +367,7 @@ def play():
         resp = session.get(movie_url, timeout=15)
         soup = BeautifulSoup(resp.text, 'html.parser')
         download_page_url = None
+        
         for a_tag in soup.find_all('a', href=True):
             text = a_tag.get_text(strip=True).lower()
             if 'generate' in text and 'download' in text:
@@ -372,6 +376,7 @@ def play():
             if 'download' in text and 'link' in text:
                 download_page_url = a_tag['href']
                 break
+                
         if not download_page_url:
             html_text = resp.text.replace('&amp;', '&').replace('\\u0026', '&').replace('\u0026', '&')
             fsl, pixel = extract_links(html_text)
@@ -379,12 +384,14 @@ def play():
                 return redirect(fsl)
             elif pixel:
                 return redirect(pixel)
-            return "Could not find download page link or direct links.", 404
+            return "Movie page par direct link nahi mila.", 404
 
         if not download_page_url.startswith('http'):
             download_page_url = BASE_URL + download_page_url
+            
         resp2 = session.get(download_page_url, timeout=15)
         html_text = resp2.text.replace('&amp;', '&').replace('\\u0026', '&').replace('\u0026', '&')
+        
         fsl, pixel = extract_links(html_text)
         if fsl:
             return redirect(fsl)
