@@ -381,14 +381,16 @@ def fix_movie_url(url):
         return ""
 
     url = url.strip()
+    base = urlsplit(BASE_URL)
 
     if url.startswith("//"):
         url = "https:" + url
 
+    # Agar relative path hai (e.g. /movie-name/)
     if not url.startswith("http://") and not url.startswith("https://"):
         if url.startswith("/"):
-            return BASE_URL + url
-        return BASE_URL + "/" + url
+            return f"{base.scheme}://{base.netloc}{url}"
+        return f"{base.scheme}://{base.netloc}/{url}"
 
     try:
         parsed = urlsplit(url)
@@ -397,8 +399,8 @@ def fix_movie_url(url):
 
     host = (parsed.netloc or "").lower()
 
+    # Agar URL kisi bhi hdhub4u mirror ka hai, toh use BASE_URL se replace karo
     if "hdhub4u" in host or "hdhub" in host:
-        base = urlsplit(BASE_URL)
         path = parsed.path or "/"
         query = f"?{parsed.query}" if parsed.query else ""
         return f"{base.scheme}://{base.netloc}{path}{query}"
