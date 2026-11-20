@@ -54,7 +54,7 @@ main_cache = {
     "data": [],
     "last_update": 0
 }
-CACHE_DURATION = 3600  # 1 hour
+CACHE_DURATION = 0  # 1 hour
 
 saved_movies = {}
 SAVED_DURATION = 3 * 24 * 60 * 60  # 3 days
