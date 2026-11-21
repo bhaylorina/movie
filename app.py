@@ -301,20 +301,27 @@ def wp_search(query):
 # 🔥 NEW: Direct JSON API Fix for HubCloud Search 🔥
 def hubcloud_direct_search(query):
     try:
-        # 1. Page fetch karke from_ac token nikaalo
-        b64_query = base64.b64encode(query.encode('utf-8')).decode('utf-8')
+        # 🔥 FIX: Query ko saaf karo taaki symbols search kharab na karein 🔥
+        clean_query = re.sub(r'[^a-zA-Z0-9\s]', ' ', query)
+        clean_query = " ".join(clean_query.split()) # Extra spaces hatao
+        
+        b64_query = base64.b64encode(clean_query.encode('utf-8')).decode('utf-8')
         init_url = f"https://hubcloud.mov/drive/search-recover.php?q={b64_query}"
         resp = session.get(init_url, timeout=15)
         
-        from_ac = "yxk0AmCjEPCLay4RjwbHbdVVcaclr6S27EKYrqaDu0E9oV-J" # Fallback
+        from_ac = "yxk0AmCjEPCLay4RjwbHbdVVcaclr6S27EKYrqaDu0E9oV-J" 
         token_match = re.search(r'const FROM_AC_TOKEN\s*=\s*"([^"]+)"', resp.text)
         if token_match: from_ac = token_match.group(1)
         
-        # 2. Direct JSON API call
-        api_url = f"https://hubcloud.mov/drive/search-recover.php?api=search&q={quote(query)}&page=1&from_ac={from_ac}"
+        # Direct JSON API call
+        api_url = f"https://hubcloud.mov/drive/search-recover.php?api=search&q={quote(clean_query)}&page=1&from_ac={from_ac}"
         api_resp = session.get(api_url, headers={"Accept": "application/json"}, timeout=15)
-        data = api_resp.json()
         
+        # Agar API 200 (OK) nahi deta toh khali list return karo
+        if api_resp.status_code != 200:
+            return []
+            
+        data = api_resp.json()
         results = []
         for hit in data.get("hits", []):
             title = hit.get("file_name", "Unknown Movie")
