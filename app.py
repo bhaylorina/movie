@@ -110,15 +110,14 @@ def extract_hubcloud_from_gadgets(url):
                     for a in hb_soup.find_all('a'):
                         text = a.get_text(strip=True).lower()
                         href = str(a.get('href', '')).lower()
-                        
-                        # 🔥 FIX: Yahan 'hubdrive' bhi check karein 🔥
-                        if 'hubcloud' in text or 'hubcloud' in href or 'hubdrive' in text or 'hubdrive' in href:
+                        if 'hubcloud' in text or 'hubcloud' in href:
                             return a['href']
                     return None
                 return hubcloud_url
     except Exception:
         pass
     return None
+
 def extract_hubcloud_from_hubdrive(url):
     try:
         resp = session.get(url, timeout=15)
@@ -458,7 +457,14 @@ def get_playlist():
 
 @app.route('/play')
 def play_movie():
-    # ... [Upar ka code same rahega] ...
+    encoded_url = request.args.get('url')
+    if not encoded_url:
+        return "No URL provided", 400
+
+    try:
+        movie_url = base64.urlsafe_b64decode(encoded_url.encode()).decode()
+    except Exception:
+        return "Invalid URL encoding", 400
 
     try:
         movie_resp = session.get(movie_url, timeout=15)
@@ -477,19 +483,14 @@ def play_movie():
             hubcloud = best_link
 
         if hubcloud:
-            # 🔥 FIX: Agar hblinks se hubdrive link aaya hai, toh usko convert karein 🔥
-            if "hubdrive.blog" in hubcloud:
-                print(f"[*] Intermediate Hubdrive link found, extracting HubCloud...")
-                hubcloud = extract_hubcloud_from_hubdrive(hubcloud)
-            
-            if hubcloud:
-                final_link = process_hubcloud(hubcloud)
-                if final_link:
-                    return redirect(final_link, code=302)
+            final_link = process_hubcloud(hubcloud)
+            if final_link:
+                return redirect(final_link, code=302)
                 
         return "Failed to extract final HubCloud link.", 500
         
     except Exception as e:
         return f"Error during extraction: {str(e)}", 500
+
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=10000, threaded=True)
