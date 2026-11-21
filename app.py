@@ -107,15 +107,25 @@ def extract_hubcloud_from_gadgets(url):
                 if "hblinks" in hubcloud_url:
                     hb_resp = session.get(hubcloud_url, timeout=15)
                     hb_soup = BeautifulSoup(hb_resp.text, 'html.parser')
+                    
+                    hubdrive_fallback = None
                     for a in hb_soup.find_all('a'):
                         text = a.get_text(strip=True).lower()
                         href = str(a.get('href', '')).lower()
+                        
+                        # Pehle Hubcloud dhundho
                         if 'hubcloud' in text or 'hubcloud' in href:
                             return a['href']
+                        # Agar nahi mila toh Hubdrive save karo
+                        if 'hubdrive' in text or 'hubdrive' in href:
+                            hubdrive_fallback = a['href']
+                            
+                    if hubdrive_fallback:
+                        return hubdrive_fallback
                     return None
                 return hubcloud_url
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"Gadgets Error: {e}")
     return None
 
 def extract_hubcloud_from_hubdrive(url):
@@ -149,8 +159,10 @@ def convert_pixeldrain_to_direct(url):
     return url
 
 def process_hubcloud(hubcloud_url):
+    print(f"--> Processing HubCloud: {hubcloud_url}")
     try:
         resp = session.get(hubcloud_url, timeout=15)
+        print(f"--> HubCloud Status: {resp.status_code}")
         soup = BeautifulSoup(resp.text, 'html.parser')
         
         gen_btn = soup.find('a', id='download')
@@ -162,32 +174,43 @@ def process_hubcloud(hubcloud_url):
                     break
         
         if not gen_btn or not gen_btn.get('href'):
+            print("--> FAILED: Generate button not found (Maybe Cloudflare block).")
             return None
             
         gen_url = gen_btn['href']
         if not gen_url.startswith('http'):
             gen_url = urllib.parse.urljoin(hubcloud_url, gen_url)
             
+        print(f"--> Clicking Generate: {gen_url}")
         gen_resp = session.get(gen_url, timeout=15)
+        print(f"--> Generate Status: {gen_resp.status_code}")
+        
         html_text = gen_resp.text.replace('&amp;', '&').replace('\\u0026', '&').replace('\u0026', '&')
         gen_soup = BeautifulSoup(html_text, 'html.parser')
         
-        # FSL Server Priority
         for a in gen_soup.find_all('a'):
             text = a.get_text(strip=True).lower()
             href = a.get('href', '')
             if 'fsl server' in text and 'fslv2' not in text:
                 if href and 'http' in href:
+                    print("--> SUCCESS: FSL Link Found!")
                     return href
         
         all_r2_links = re.findall(r'https?://[a-zA-Z0-9._-]+\.r2\.cloudflarestorage\.com/[^\s"\'<>]+', html_text)
         valid_r2_links = [l for l in all_r2_links if 't3apac' not in l.lower() and 'fslv2' not in l.lower()]
         
         if valid_r2_links:
+            print("--> SUCCESS: R2 Link Found!")
             for link in valid_r2_links:
                 if 'X-Amz-Expires=28800' in link:
                     return link
             return valid_r2_links[0]
+
+        print("--> FAILED: FSL ya R2 link generate page par nahi mila.")
+        return None
+    except Exception as e:
+        print(f"--> HubCloud Error: {e}")
+    return None
 
         # PixelServer Fallback
         found_links = set()
@@ -461,10 +484,13 @@ def play_movie():
     if not encoded_url:
         return "No URL provided", 400
 
+    # 🔥 FIX: Missing Base64 Padding ko wapas add karein 🔥
+    encoded_url += "=" * ((4 - len(encoded_url) % 4) % 4)
+
     try:
         movie_url = base64.urlsafe_b64decode(encoded_url.encode()).decode()
-    except Exception:
-        return "Invalid URL encoding", 400
+    except Exception as e:
+        return f"Invalid URL encoding: {str(e)}", 400
 
     try:
         movie_resp = session.get(movie_url, timeout=15)
@@ -473,6 +499,8 @@ def play_movie():
         best_link = get_best_link(movie_soup, movie_url)
         if not best_link:
             return "No 1080p link found for this movie", 404
+            
+        print(f"[*] Best Link Found: {best_link}")
 
         hubcloud = None
         if "greenmotors" in best_link or "gadgetsweb" in best_link:
@@ -483,14 +511,22 @@ def play_movie():
             hubcloud = best_link
 
         if hubcloud:
-            final_link = process_hubcloud(hubcloud)
-            if final_link:
-                return redirect(final_link, code=302)
+            # Agar hblinks se hubdrive link aaya hai, toh usko convert karein
+            if "hubdrive.blog" in hubcloud:
+                print(f"[*] Intermediate Hubdrive found: {hubcloud}")
+                hubcloud = extract_hubcloud_from_hubdrive(hubcloud)
+            
+            if hubcloud:
+                final_link = process_hubcloud(hubcloud)
+                if final_link:
+                    return redirect(final_link, code=302)
                 
-        return "Failed to extract final HubCloud link.", 500
+        return "Failed to extract final HubCloud link. (Check Render Logs for details)", 500
         
     except Exception as e:
-        return f"Error during extraction: {str(e)}", 500
-
+        import traceback
+        error_details = traceback.format_exc()
+        print(error_details)
+        return f"Error during extraction: {str(e)}\n{error_details}", 500
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=10000, threaded=True)
