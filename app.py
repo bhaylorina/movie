@@ -294,14 +294,21 @@ def get_valid_saved():
         load_saved_movies_from_cloud()
 
     for title, data in list(saved_movies.items()):
-        if now - data.get("saved_at", 0) <= SAVED_DURATION:
-            valid[title] = data
+        # Check karo ki data ek dictionary hai ya nahi (init: true ko ignore karne ke liye)
+        if isinstance(data, dict):
+            if now - data.get("saved_at", 0) <= SAVED_DURATION:
+                valid[title] = data
+            else:
+                del saved_movies[title]
         else:
+            # Agar koi invalid data hai (jaise init: true), toh usko memory se delete kar do
             del saved_movies[title]
             
-    # Agar kuch movies expire hui hain, toh cloud ko update kar do
+    # Agar kuch invalid ya expire movies delete hui hain, toh cloud ko update kar do
     if len(valid) != len(saved_movies):
         sync_saved_movies_to_cloud()
+        
+    return valid
         
     return valid
 
