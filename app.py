@@ -141,7 +141,7 @@ def extract_hubcloud_from_hubdrive(url):
         pass
     return None
 
-# 🛑 यहाँ नया गेमड्राइव बायपास लॉजिक जोड़ा गया है
+# 🛑 गेमड्राइव बायपास लॉजिक
 def convert_pixeldrain_to_direct(url):
     if not url:
         return None
@@ -188,6 +188,7 @@ def process_hubcloud(hubcloud_url):
         html_text = gen_resp.text.replace('&amp;', '&').replace('\\u0026', '&').replace('\u0026', '&')
         gen_soup = BeautifulSoup(html_text, 'html.parser')
         
+        # FSL Server Priority
         for a in gen_soup.find_all('a'):
             text = a.get_text(strip=True).lower()
             href = a.get('href', '')
@@ -206,13 +207,7 @@ def process_hubcloud(hubcloud_url):
                     return link
             return valid_r2_links[0]
 
-        print("--> FAILED: FSL ya R2 link generate page par nahi mila.")
-        return None
-    except Exception as e:
-        print(f"--> HubCloud Error: {e}")
-    return None
-
-        # PixelServer Fallback
+        # 🔥 PixelServer Fallback (Indentation FIXED HERE) 🔥
         found_links = set()
         for match in re.finditer(r'pixeldrain\.(?:dev|com)/u/([a-zA-Z0-9]+)', html_text):
             found_links.add(match.group(1))
@@ -255,6 +250,7 @@ def process_hubcloud(hubcloud_url):
         elif found_links:
             return convert_pixeldrain_to_direct(f"https://pixeldrain.dev/u/{list(found_links)[0]}")
 
+        print("--> FAILED: FSL, R2 ya PixelDrain link nahi mila.")
         return None
     except Exception as e:
         print(f"HubCloud Error: {e}")
@@ -528,5 +524,6 @@ def play_movie():
         error_details = traceback.format_exc()
         print(error_details)
         return f"Error during extraction: {str(e)}\n{error_details}", 500
+
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=10000, threaded=True)
