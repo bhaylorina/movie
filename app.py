@@ -473,7 +473,7 @@ def remove(title):
 @app.route('/playlist.m3u')
 def get_playlist():
     global cache_data
-    if cache_data["m3u"] and (time.time() - cache_data["timestamp"] < 3600):
+    if cache_data["m3u"] and (time.time() - cache_data["timestamp"] < 0):
         saved_part = ""
         for title, data in get_valid_saved().items():
             enc_url = base64.urlsafe_b64encode(data["url"].encode()).decode()
