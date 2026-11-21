@@ -338,8 +338,6 @@ def get_valid_saved():
         sync_saved_movies_to_cloud()
         
     return valid
-        
-    return valid
 
 def fix_movie_url(url):
     if not url: return ""
@@ -396,40 +394,49 @@ def wp_search(query):
             print(f"WP error: {e}")
     return []
 def hubcloud_direct_search(query):
-    # Query ko Base64 me encode karo (jaise screenshot me tha)
     try:
         b64_query = base64.b64encode(query.encode('utf-8')).decode('utf-8')
         search_url = f"https://hubcloud.mov/drive/search-recover.php?q={b64_query}"
         
         resp = session.get(search_url, timeout=15)
         if resp.status_code != 200:
+            print(f"[-] HubCloud Search Failed: Status {resp.status_code}")
             return []
             
         soup = BeautifulSoup(resp.text, 'html.parser')
         results = []
         seen_urls = set()
         
-        # Page par saare links dhundho jo hubcloud drive ke hain
+        # Page par saare links dhundho
         for a_tag in soup.find_all('a', href=True):
             href = a_tag['href']
-            if "hubcloud.mov/drive/" in href and "search-recover" not in href:
+            if "/drive/" in href and "search-recover" not in href:
+                # Agar link relative hai ( /drive/... ) toh use full URL banao
+                if href.startswith('/'):
+                    href = f"https://hubcloud.mov{href}"
+                    
                 if href in seen_urls: continue
                 
-                # Link ke aas-paas ka text (Title) nikalne ki koshish karo
-                parent = a_tag.find_parent(['div', 'article', 'li'])
-                title = "Unknown Movie"
-                size_text = ""
-                
+                # Title nikalne ka smart tarika
+                title = ""
+                parent = a_tag.find_parent(['div', 'li', 'article'])
                 if parent:
-                    # Title nikalne ke liye (h1, h2, h3 ya bade text tags)
-                    title_elem = parent.find(['h1', 'h2', 'h3', 'h4', 'b', 'strong'])
+                    # Pehle heading ya bold tag dhundho
+                    title_elem = parent.find(['h1', 'h2', 'h3', 'h4', 'h5', 'b', 'strong'])
                     if title_elem:
                         title = title_elem.get_text(strip=True)
                     else:
-                        # Agar title tag na mile toh parent ka text le lo
-                        title = parent.get_text(strip=True)[:80] + "..."
+                        # Agar nahi mila toh poore block ka text lo aur 'Open' se pehle ka hissa lo
+                        full_text = parent.get_text(strip=True)
+                        title = full_text.split('Open')[0].strip()
                         
+                if not title:
+                    title = "HubCloud File"
+                    
                 title = title.replace('\n', ' ').strip()
+                if len(title) > 100:
+                    title = title[:100] + "..."
+                    
                 seen_urls.add(href)
                 results.append({"title": title, "url": href})
                 
@@ -449,7 +456,8 @@ def home():
         saved_html += f'''
         <div style="background:#222; padding:10px; margin:5px 0; border-radius:5px; display:flex; justify-content:space-between;">
             <span>{title_esc}</span>
-            <a href="/remove/{title_q}" style="color:red; text-decoration:none;">Remove</a>
+            <!-- YAHAN FIX LAGA HAI -->
+            <a href="/remove?title={title_q}" style="color:red; text-decoration:none;">Remove</a>
         </div>'''
     
     if not saved_html: saved_html = "<p style='color:#888;'>No saved movies yet.</p>"
@@ -557,14 +565,20 @@ def save():
             
     return redirect("/")
 
-@app.route('/remove/<path:title>')
-def remove(title):
-    title = unquote(title)
-    saved_movies.pop(title, None)
-    
-    # 🔥 Cloud se bhi delete karo 🔥
-    sync_saved_movies_to_cloud()
-    
+@app.route('/remove')
+def remove():
+    global saved_movies
+    # Agar server so gaya tha aur memory khali hai, toh pehle cloud se data load karo
+    if not saved_movies:
+        load_saved_movies_from_cloud()
+        
+    title_q = request.args.get('title', '')
+    if title_q:
+        title = unquote(title_q)
+        saved_movies.pop(title, None)
+        # Cloud se delete karo
+        sync_saved_movies_to_cloud()
+        
     return redirect("/")
 
 @app.route('/playlist.m3u')
