@@ -185,6 +185,34 @@ def convert_pixeldrain_to_direct(url):
 
 def process_hubcloud(hubcloud_url):
     print(f"--> Processing HubCloud: {hubcloud_url}")
+    
+    # 🔥 FIX: Agar Search-Recover page hai, toh naya link nikaalo 🔥
+    if "search-recover.php" in hubcloud_url:
+        print("--> Search-Recover page detected. Extracting valid drive link...")
+        try:
+            recover_resp = session.get(hubcloud_url, timeout=15)
+            recover_soup = BeautifulSoup(recover_resp.text, 'html.parser')
+            
+            valid_drive_link = None
+            for a_tag in recover_soup.find_all('a', href=True):
+                href = a_tag['href']
+                # Page se pehla valid drive link dhundho
+                if "hubcloud.mov/drive/" in href and "search-recover" not in href:
+                    valid_drive_link = href
+                    break
+            
+            if valid_drive_link:
+                print(f"--> Found valid drive link: {valid_drive_link}")
+                # Naye link ke saath function ko wapas call karo
+                return process_hubcloud(valid_drive_link)
+            else:
+                print("--> FAILED: Search-recover page par koi valid drive link nahi mila.")
+                return None
+        except Exception as e:
+            print(f"--> Error parsing search-recover page: {e}")
+            return None
+
+    # 🔥 Normal HubCloud Drive Process 🔥
     try:
         resp = session.get(hubcloud_url, timeout=15)
         print(f"--> HubCloud Status: {resp.status_code}")
@@ -222,6 +250,7 @@ def process_hubcloud(hubcloud_url):
                     print("--> SUCCESS: FSL Link Found!")
                     return href
         
+        # R2 Cloudflare Links
         all_r2_links = re.findall(r'https?://[a-zA-Z0-9._-]+\.r2\.cloudflarestorage\.com/[^\s"\'<>]+', html_text)
         valid_r2_links = [l for l in all_r2_links if 't3apac' not in l.lower() and 'fslv2' not in l.lower()]
         
@@ -232,7 +261,7 @@ def process_hubcloud(hubcloud_url):
                     return link
             return valid_r2_links[0]
 
-        # 🔥 PixelServer Fallback (Indentation FIXED HERE) 🔥
+        # PixelServer Fallback
         found_links = set()
         for match in re.finditer(r'pixeldrain\.(?:dev|com)/u/([a-zA-Z0-9]+)', html_text):
             found_links.add(match.group(1))
@@ -278,7 +307,7 @@ def process_hubcloud(hubcloud_url):
         print("--> FAILED: FSL, R2 ya PixelDrain link nahi mila.")
         return None
     except Exception as e:
-        print(f"HubCloud Error: {e}")
+        print(f"--> HubCloud Error: {e}")
     return None
 
 
@@ -366,6 +395,48 @@ def wp_search(query):
         except Exception as e:
             print(f"WP error: {e}")
     return []
+def hubcloud_direct_search(query):
+    # Query ko Base64 me encode karo (jaise screenshot me tha)
+    try:
+        b64_query = base64.b64encode(query.encode('utf-8')).decode('utf-8')
+        search_url = f"https://hubcloud.mov/drive/search-recover.php?q={b64_query}"
+        
+        resp = session.get(search_url, timeout=15)
+        if resp.status_code != 200:
+            return []
+            
+        soup = BeautifulSoup(resp.text, 'html.parser')
+        results = []
+        seen_urls = set()
+        
+        # Page par saare links dhundho jo hubcloud drive ke hain
+        for a_tag in soup.find_all('a', href=True):
+            href = a_tag['href']
+            if "hubcloud.mov/drive/" in href and "search-recover" not in href:
+                if href in seen_urls: continue
+                
+                # Link ke aas-paas ka text (Title) nikalne ki koshish karo
+                parent = a_tag.find_parent(['div', 'article', 'li'])
+                title = "Unknown Movie"
+                size_text = ""
+                
+                if parent:
+                    # Title nikalne ke liye (h1, h2, h3 ya bade text tags)
+                    title_elem = parent.find(['h1', 'h2', 'h3', 'h4', 'b', 'strong'])
+                    if title_elem:
+                        title = title_elem.get_text(strip=True)
+                    else:
+                        # Agar title tag na mile toh parent ka text le lo
+                        title = parent.get_text(strip=True)[:80] + "..."
+                        
+                title = title.replace('\n', ' ').strip()
+                seen_urls.add(href)
+                results.append({"title": title, "url": href})
+                
+        return results
+    except Exception as e:
+        print(f"HubCloud Search Error: {e}")
+        return []
 
 # ================= FLASK ROUTES =================
 
@@ -408,27 +479,53 @@ def search():
     query = request.args.get("q", "").strip()
     if not query: return redirect("/")
     
-    results = typesense_search(query)
-    if not results: results = wp_search(query)
+    # 1. HDHub4u Search
+    hdhub_results = typesense_search(query)
+    if not hdhub_results: hdhub_results = wp_search(query)
+    
+    # 2. HubCloud Direct Search
+    hubcloud_results = hubcloud_direct_search(query)
     
     results_html = ""
-    for movie in results:
-        title_esc = html_lib.escape(movie["title"])
-        enc_url = base64.urlsafe_b64encode(movie["url"].encode()).decode()
-        title_q = quote(movie["title"], safe="")
-        
-        results_html += f'''
-        <div style="background:#222; padding:15px; margin:10px 0; border-radius:5px; display:flex; justify-content:space-between; align-items:center;">
-            <span style="max-width:70%; font-size:14px;">{title_esc}</span>
-            <form action="/save" method="post" style="margin:0;">
-                <input type="hidden" name="title" value="{title_q}">
-                <input type="hidden" name="url" value="{enc_url}">
-                <button type="submit" style="padding:8px 15px; background:#28a745; color:#fff; border:none; border-radius:5px; cursor:pointer;">Save</button>
-            </form>
-        </div>'''
-        
+    
+    # --- HDHub4u Results Section ---
+    if hdhub_results:
+        results_html += "<h3 style='color:#00d2ff; border-bottom: 1px solid #333; padding-bottom: 5px;'>🌐 HDHub4u Results (Scraped)</h3>"
+        for movie in hdhub_results:
+            title_esc = html_lib.escape(movie["title"])
+            enc_url = base64.urlsafe_b64encode(movie["url"].encode()).decode()
+            title_q = quote(movie["title"], safe="")
+            
+            results_html += f'''
+            <div style="background:#222; padding:15px; margin:10px 0; border-radius:5px; display:flex; justify-content:space-between; align-items:center; border-left: 4px solid #00d2ff;">
+                <span style="max-width:70%; font-size:14px;">{title_esc}</span>
+                <form action="/save" method="post" style="margin:0;">
+                    <input type="hidden" name="title" value="{title_q}">
+                    <input type="hidden" name="url" value="{enc_url}">
+                    <button type="submit" style="padding:8px 15px; background:#28a745; color:#fff; border:none; border-radius:5px; cursor:pointer;">Save</button>
+                </form>
+            </div>'''
+            
+    # --- HubCloud Results Section ---
+    if hubcloud_results:
+        results_html += "<h3 style='color:#ff9f43; border-bottom: 1px solid #333; padding-bottom: 5px; margin-top:30px;'>☁️ HubCloud Direct Results (Fast & Stable)</h3>"
+        for movie in hubcloud_results:
+            title_esc = html_lib.escape(movie["title"])
+            enc_url = base64.urlsafe_b64encode(movie["url"].encode()).decode()
+            title_q = quote(movie["title"], safe="")
+            
+            results_html += f'''
+            <div style="background:#222; padding:15px; margin:10px 0; border-radius:5px; display:flex; justify-content:space-between; align-items:center; border-left: 4px solid #ff9f43;">
+                <span style="max-width:70%; font-size:14px;">{title_esc}</span>
+                <form action="/save" method="post" style="margin:0;">
+                    <input type="hidden" name="title" value="{title_q}">
+                    <input type="hidden" name="url" value="{enc_url}">
+                    <button type="submit" style="padding:8px 15px; background:#ff9f43; color:#fff; border:none; border-radius:5px; cursor:pointer; font-weight:bold;">Save</button>
+                </form>
+            </div>'''
+    
     if not results_html:
-        results_html = "<p style='color:#aaa;'>No movies found. Try different spelling.</p>"
+        results_html = "<p style='color:#aaa;'>No movies found on HDHub4u or HubCloud. Try different spelling.</p>"
 
     return f"""
     <!DOCTYPE html>
