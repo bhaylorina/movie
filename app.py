@@ -12,6 +12,8 @@ import requests as std_requests
 from flask import Flask, request, redirect, Response
 
 app = Flask(__name__)
+JSONBIN_ID = "6b0131faac6210605a99192c"
+JSONBIN_KEY = "$2a$10$NXJcYdSiU7drll/yRzSEK.rnmvMBGAwWfLstiSisvpDfNijjjRGfu"
 
 BASE_URL = "https://new15.hdhub4u.cl"
 
@@ -39,6 +41,29 @@ api_session.headers.update(API_HEADERS)
 # Simple In-Memory Cache
 cache_data = {"m3u": None, "timestamp": 0}
 saved_movies = {}
+def load_saved_movies_from_cloud():
+    global saved_movies
+    try:
+        headers = {"X-Master-Key": JSONBIN_KEY}
+        resp = std_requests.get(f"https://api.jsonbin.io/v3/b/{JSONBIN_ID}/latest", headers=headers, timeout=10)
+        if resp.status_code == 200:
+            data = resp.json().get("record", {})
+            if isinstance(data, dict) and data:
+                saved_movies.update(data)
+                print("[+] Cloud se saved movies load ho gayi!")
+    except Exception as e:
+        print(f"[-] Cloud load error: {e}")
+
+def sync_saved_movies_to_cloud():
+    try:
+        headers = {
+            "X-Master-Key": JSONBIN_KEY,
+            "Content-Type": "application/json"
+        }
+        std_requests.put(f"https://api.jsonbin.io/v3/b/{JSONBIN_ID}", json=saved_movies, headers=headers, timeout=10)
+        print("[+] Saved movies Cloud me sync ho gayi!")
+    except Exception as e:
+        print(f"[-] Cloud sync error: {e}")
 SAVED_DURATION = 3 * 24 * 60 * 60  # 3 दिन
 
 def rot13(s):
@@ -260,13 +285,24 @@ def process_hubcloud(hubcloud_url):
 # ================= सर्च और सेव फंक्शन्स =================
 
 def get_valid_saved():
+    global saved_movies
     now = time.time()
     valid = {}
+    
+    # 🔥 Cloud se data fetch karo agar memory khali hai 🔥
+    if not saved_movies:
+        load_saved_movies_from_cloud()
+
     for title, data in list(saved_movies.items()):
         if now - data.get("saved_at", 0) <= SAVED_DURATION:
             valid[title] = data
         else:
             del saved_movies[title]
+            
+    # Agar kuch movies expire hui hain, toh cloud ko update kar do
+    if len(valid) != len(saved_movies):
+        sync_saved_movies_to_cloud()
+        
     return valid
 
 def fix_movie_url(url):
@@ -408,8 +444,12 @@ def save():
         try:
             movie_url = base64.urlsafe_b64decode(enc_url.encode()).decode()
             saved_movies[title] = {"title": title, "url": movie_url, "saved_at": time.time()}
-        except Exception:
-            pass
+            
+            # 🔥 Cloud me save karo 🔥
+            sync_saved_movies_to_cloud() 
+            
+        except Exception as e:
+            print(f"Save error: {e}")
             
     return redirect("/")
 
@@ -417,8 +457,11 @@ def save():
 def remove(title):
     title = unquote(title)
     saved_movies.pop(title, None)
+    
+    # 🔥 Cloud se bhi delete karo 🔥
+    sync_saved_movies_to_cloud()
+    
     return redirect("/")
-
 
 @app.route('/playlist.m3u')
 def get_playlist():
