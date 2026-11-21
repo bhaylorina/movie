@@ -212,6 +212,28 @@ def process_hubcloud(hubcloud_url):
         
         html_text = gen_resp.text.replace('&amp;', '&').replace('\\u0026', '&').replace('\u0026', '&')
         gen_soup = BeautifulSoup(html_text, 'html.parser')
+        
+        
+        # FSL Server Priority
+        for a in gen_soup.find_all('a'):
+            text = a.get_text(strip=True).lower()
+            href = a.get('href', '')
+            if 'fsl server' in text and 'fslv2' not in text:
+                if href and 'http' in href:
+                    print("--> SUCCESS: FSL Link Found!")
+                    return href
+        
+        all_r2_links = re.findall(r'https?://[a-zA-Z0-9._-]+\.r2\.cloudflarestorage\.com/[^\s"\'<>]+', html_text)
+        valid_r2_links = [l for l in all_r2_links if 't3apac' not in l.lower() and 'fslv2' not in l.lower()]
+        
+        if valid_r2_links:
+            print("--> SUCCESS: R2 Link Found!")
+            for link in valid_r2_links:
+                if 'X-Amz-Expires=28800' in link:
+                    return link
+            return valid_r2_links[0]
+
+        # 🔥 PixelServer Fallback (Indentation FIXED HERE) 🔥
         found_links = set()
         for match in re.finditer(r'pixeldrain\.(?:dev|com)/u/([a-zA-Z0-9]+)', html_text):
             found_links.add(match.group(1))
@@ -253,27 +275,6 @@ def process_hubcloud(hubcloud_url):
             return convert_pixeldrain_to_direct(f"https://pixeldrain.dev/u/{real_ids[0]}")
         elif found_links:
             return convert_pixeldrain_to_direct(f"https://pixeldrain.dev/u/{list(found_links)[0]}")
-        
-        # FSL Server Priority
-        for a in gen_soup.find_all('a'):
-            text = a.get_text(strip=True).lower()
-            href = a.get('href', '')
-            if 'fsl server' in text and 'fslv2' not in text:
-                if href and 'http' in href:
-                    print("--> SUCCESS: FSL Link Found!")
-                    return href
-        
-        all_r2_links = re.findall(r'https?://[a-zA-Z0-9._-]+\.r2\.cloudflarestorage\.com/[^\s"\'<>]+', html_text)
-        valid_r2_links = [l for l in all_r2_links if 't3apac' not in l.lower() and 'fslv2' not in l.lower()]
-        
-        if valid_r2_links:
-            print("--> SUCCESS: R2 Link Found!")
-            for link in valid_r2_links:
-                if 'X-Amz-Expires=28800' in link:
-                    return link
-            return valid_r2_links[0]
-
-        # 🔥 PixelServer Fallback (Indentation FIXED HERE) 🔥
         
 
         print("--> FAILED: FSL, R2 ya PixelDrain link nahi mila.")
