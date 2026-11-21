@@ -41,6 +41,8 @@ api_session.headers.update(API_HEADERS)
 # Simple In-Memory Cache
 cache_data = {"m3u": None, "timestamp": 0}
 saved_movies = {}
+SAVED_DURATION = 3 * 24 * 60 * 60  # 3 दिन
+
 def load_saved_movies_from_cloud():
     global saved_movies
     try:
@@ -64,7 +66,6 @@ def sync_saved_movies_to_cloud():
         print("[+] Saved movies Cloud me sync ho gayi!")
     except Exception as e:
         print(f"[-] Cloud sync error: {e}")
-SAVED_DURATION = 3 * 24 * 60 * 60  # 3 दिन
 
 def rot13(s):
     res = []
@@ -170,23 +171,19 @@ def extract_hubcloud_from_hubdrive(url):
 def convert_pixeldrain_to_direct(url):
     if not url:
         return None
-        
     url = url.replace('&amp;', '&')
-    
-    # GameDrive Bypass Regex
     match = re.search(r'https?://(?:pixeldra\.in|pixeldrain\.com|pixeldrain\.net|pixeldrain\.dev)/(?:u|api/file|l)/([^?\s]+)', url)
     if match:
         file_id = match.group(1)
         direct_url = f"https://cdn.pixeldrain.eu.cc/{file_id}"
         print(f"      [🔄] Converted PixelDrain (GameDrive): {direct_url}")
         return direct_url
-        
     return url
 
 def process_hubcloud(hubcloud_url):
     print(f"--> Processing HubCloud: {hubcloud_url}")
     
-    # 🔥 FIX: Agar Search-Recover page hai, toh naya link nikaalo 🔥
+    # 🔥 FIX: Search-Recover page handling 🔥
     if "search-recover.php" in hubcloud_url:
         print("--> Search-Recover page detected. Extracting valid drive link...")
         try:
@@ -196,14 +193,14 @@ def process_hubcloud(hubcloud_url):
             valid_drive_link = None
             for a_tag in recover_soup.find_all('a', href=True):
                 href = a_tag['href']
-                # Page se pehla valid drive link dhundho
-                if "hubcloud.mov/drive/" in href and "search-recover" not in href:
+                if "/drive/" in href and "search-recover" not in href:
+                    if href.startswith('/'):
+                        href = f"https://hubcloud.mov{href}"
                     valid_drive_link = href
                     break
             
             if valid_drive_link:
                 print(f"--> Found valid drive link: {valid_drive_link}")
-                # Naye link ke saath function ko wapas call karo
                 return process_hubcloud(valid_drive_link)
             else:
                 print("--> FAILED: Search-recover page par koi valid drive link nahi mila.")
@@ -318,22 +315,19 @@ def get_valid_saved():
     now = time.time()
     valid = {}
     
-    # 🔥 Cloud se data fetch karo agar memory khali hai 🔥
+    # Cloud se data fetch karo agar memory khali hai
     if not saved_movies:
         load_saved_movies_from_cloud()
 
     for title, data in list(saved_movies.items()):
-        # Check karo ki data ek dictionary hai ya nahi (init: true ko ignore karne ke liye)
         if isinstance(data, dict):
             if now - data.get("saved_at", 0) <= SAVED_DURATION:
                 valid[title] = data
             else:
                 del saved_movies[title]
         else:
-            # Agar koi invalid data hai (jaise init: true), toh usko memory se delete kar do
             del saved_movies[title]
             
-    # Agar kuch invalid ya expire movies delete hui hain, toh cloud ko update kar do
     if len(valid) != len(saved_movies):
         sync_saved_movies_to_cloud()
         
@@ -393,6 +387,7 @@ def wp_search(query):
         except Exception as e:
             print(f"WP error: {e}")
     return []
+
 def hubcloud_direct_search(query):
     try:
         b64_query = base64.b64encode(query.encode('utf-8')).decode('utf-8')
@@ -407,26 +402,21 @@ def hubcloud_direct_search(query):
         results = []
         seen_urls = set()
         
-        # Page par saare links dhundho
         for a_tag in soup.find_all('a', href=True):
             href = a_tag['href']
             if "/drive/" in href and "search-recover" not in href:
-                # Agar link relative hai ( /drive/... ) toh use full URL banao
                 if href.startswith('/'):
                     href = f"https://hubcloud.mov{href}"
                     
                 if href in seen_urls: continue
                 
-                # Title nikalne ka smart tarika
                 title = ""
                 parent = a_tag.find_parent(['div', 'li', 'article'])
                 if parent:
-                    # Pehle heading ya bold tag dhundho
                     title_elem = parent.find(['h1', 'h2', 'h3', 'h4', 'h5', 'b', 'strong'])
                     if title_elem:
                         title = title_elem.get_text(strip=True)
                     else:
-                        # Agar nahi mila toh poore block ka text lo aur 'Open' se pehle ka hissa lo
                         full_text = parent.get_text(strip=True)
                         title = full_text.split('Open')[0].strip()
                         
@@ -454,10 +444,9 @@ def home():
         title_esc = html_lib.escape(title)
         title_q = quote(title, safe="")
         saved_html += f'''
-        <div style="background:#222; padding:10px; margin:5px 0; border-radius:5px; display:flex; justify-content:space-between;">
-            <span>{title_esc}</span>
-            <!-- YAHAN FIX LAGA HAI -->
-            <a href="/remove?title={title_q}" style="color:red; text-decoration:none;">Remove</a>
+        <div style="background:#222; padding:10px; margin:5px 0; border-radius:5px; display:flex; justify-content:space-between; align-items:center;">
+            <span style="max-width:80%;">{title_esc}</span>
+            <a href="/remove?title={title_q}" style="color:red; text-decoration:none; font-weight:bold;">Remove</a>
         </div>'''
     
     if not saved_html: saved_html = "<p style='color:#888;'>No saved movies yet.</p>"
@@ -465,13 +454,27 @@ def home():
     return f"""
     <!DOCTYPE html>
     <html>
-    <head><meta name="viewport" content="width=device-width, initial-scale=1"><title>HDHub Scraper</title></head>
+    <head><meta name="viewport" content="width=device-width, initial-scale=1"><title>Movie Scraper</title></head>
     <body style="font-family: Arial; background:#111; color:#fff; padding:20px; text-align:center;">
-        <h1>🎬 HDHub4u Scraper</h1>
-        <form action="/search" method="get">
-            <input type="text" name="q" placeholder="Search movie..." required style="padding:10px; width:70%; max-width:300px; border-radius:5px; border:none;">
-            <button type="submit" style="padding:10px 20px; background:#007bff; color:#fff; border:none; border-radius:5px;">Search</button>
-        </form>
+        <h1>🎬 Movie Scraper</h1>
+        
+        <!-- HDHub4u Search Box -->
+        <div style="background:#1e1e1e; padding:15px; border-radius:8px; margin-bottom: 15px; border-left: 4px solid #00d2ff;">
+            <h3 style="margin-top:0; color:#00d2ff;">🌐 Search HDHub4u</h3>
+            <form action="/search" method="get">
+                <input type="text" name="q" placeholder="Search movie on HDHub..." required style="padding:10px; width:70%; max-width:300px; border-radius:5px; border:none;">
+                <button type="submit" style="padding:10px 20px; background:#007bff; color:#fff; border:none; border-radius:5px; font-weight:bold;">Search</button>
+            </form>
+        </div>
+
+        <!-- HubCloud Search Box -->
+        <div style="background:#1e1e1e; padding:15px; border-radius:8px; border-left: 4px solid #ff9f43;">
+            <h3 style="margin-top:0; color:#ff9f43;">☁️ Search HubCloud (Direct)</h3>
+            <form action="/search_hubcloud" method="get">
+                <input type="text" name="q" placeholder="Search movie on HubCloud..." required style="padding:10px; width:70%; max-width:300px; border-radius:5px; border:none;">
+                <button type="submit" style="padding:10px 20px; background:#ff9f43; color:#fff; border:none; border-radius:5px; font-weight:bold;">Search</button>
+            </form>
+        </div>
         
         <h3 style="margin-top:40px;">⭐ Saved Movies</h3>
         {saved_html}
@@ -487,18 +490,12 @@ def search():
     query = request.args.get("q", "").strip()
     if not query: return redirect("/")
     
-    # 1. HDHub4u Search
+    # HDHub4u Search Only
     hdhub_results = typesense_search(query)
     if not hdhub_results: hdhub_results = wp_search(query)
     
-    # 2. HubCloud Direct Search
-    hubcloud_results = hubcloud_direct_search(query)
-    
     results_html = ""
-    
-    # --- HDHub4u Results Section ---
     if hdhub_results:
-        results_html += "<h3 style='color:#00d2ff; border-bottom: 1px solid #333; padding-bottom: 5px;'>🌐 HDHub4u Results (Scraped)</h3>"
         for movie in hdhub_results:
             title_esc = html_lib.escape(movie["title"])
             enc_url = base64.urlsafe_b64encode(movie["url"].encode()).decode()
@@ -513,10 +510,31 @@ def search():
                     <button type="submit" style="padding:8px 15px; background:#28a745; color:#fff; border:none; border-radius:5px; cursor:pointer;">Save</button>
                 </form>
             </div>'''
-            
-    # --- HubCloud Results Section ---
+    
+    if not results_html:
+        results_html = "<p style='color:#aaa;'>No movies found on HDHub4u.</p>"
+
+    return f"""
+    <!DOCTYPE html>
+    <html>
+    <head><meta name="viewport" content="width=device-width, initial-scale=1"><title>HDHub Search Results</title></head>
+    <body style="font-family: Arial; background:#111; color:#fff; padding:20px;">
+        <a href="/" style="color:#fff; text-decoration:none;">⬅ Back</a>
+        <h3>HDHub4u Results for: "{html_lib.escape(query)}"</h3>
+        {results_html}
+    </body>
+    </html>
+    """
+
+@app.route('/search_hubcloud')
+def search_hubcloud():
+    query = request.args.get("q", "").strip()
+    if not query: return redirect("/")
+    
+    hubcloud_results = hubcloud_direct_search(query)
+    
+    results_html = ""
     if hubcloud_results:
-        results_html += "<h3 style='color:#ff9f43; border-bottom: 1px solid #333; padding-bottom: 5px; margin-top:30px;'>☁️ HubCloud Direct Results (Fast & Stable)</h3>"
         for movie in hubcloud_results:
             title_esc = html_lib.escape(movie["title"])
             enc_url = base64.urlsafe_b64encode(movie["url"].encode()).decode()
@@ -531,17 +549,16 @@ def search():
                     <button type="submit" style="padding:8px 15px; background:#ff9f43; color:#fff; border:none; border-radius:5px; cursor:pointer; font-weight:bold;">Save</button>
                 </form>
             </div>'''
-    
-    if not results_html:
-        results_html = "<p style='color:#aaa;'>No movies found on HDHub4u or HubCloud. Try different spelling.</p>"
+    else:
+        results_html = "<p style='color:#aaa;'>No movies found on HubCloud. (Note: Server block ho sakta hai ya search result khali hai).</p>"
 
     return f"""
     <!DOCTYPE html>
     <html>
-    <head><meta name="viewport" content="width=device-width, initial-scale=1"><title>Search Results</title></head>
+    <head><meta name="viewport" content="width=device-width, initial-scale=1"><title>HubCloud Search Results</title></head>
     <body style="font-family: Arial; background:#111; color:#fff; padding:20px;">
         <a href="/" style="color:#fff; text-decoration:none;">⬅ Back</a>
-        <h3>Results for: "{html_lib.escape(query)}"</h3>
+        <h3>HubCloud Results for: "{html_lib.escape(query)}"</h3>
         {results_html}
     </body>
     </html>
@@ -557,7 +574,7 @@ def save():
             movie_url = base64.urlsafe_b64decode(enc_url.encode()).decode()
             saved_movies[title] = {"title": title, "url": movie_url, "saved_at": time.time()}
             
-            # 🔥 Cloud me save karo 🔥
+            # Cloud me save karo
             sync_saved_movies_to_cloud() 
             
         except Exception as e:
@@ -568,7 +585,6 @@ def save():
 @app.route('/remove')
 def remove():
     global saved_movies
-    # Agar server so gaya tha aur memory khali hai, toh pehle cloud se data load karo
     if not saved_movies:
         load_saved_movies_from_cloud()
         
@@ -576,7 +592,6 @@ def remove():
     if title_q:
         title = unquote(title_q)
         saved_movies.pop(title, None)
-        # Cloud se delete karo
         sync_saved_movies_to_cloud()
         
     return redirect("/")
@@ -641,7 +656,7 @@ def play_movie():
     if not encoded_url:
         return "No URL provided", 400
 
-    # 🔥 FIX: Missing Base64 Padding ko wapas add karein 🔥
+    # Missing Base64 Padding fix
     encoded_url += "=" * ((4 - len(encoded_url) % 4) % 4)
 
     try:
@@ -650,12 +665,18 @@ def play_movie():
         return f"Invalid URL encoding: {str(e)}", 400
 
     try:
-        movie_resp = session.get(movie_url, timeout=15)
-        movie_soup = BeautifulSoup(movie_resp.text, 'html.parser')
-        
-        best_link = get_best_link(movie_soup, movie_url)
-        if not best_link:
-            return "No 1080p link found for this movie", 404
+        # 🔥 FIX: Check karo ki kya URL pehle se hi direct download link hai 🔥
+        if "hubcloud" in movie_url or "hubdrive" in movie_url or "greenmotors" in movie_url or "gadgetsweb" in movie_url:
+            best_link = movie_url
+            print(f"[*] Direct link saved. Bypassing HDHub scrape.")
+        else:
+            # Agar HDHub page hai tabhi scrape karo
+            movie_resp = session.get(movie_url, timeout=15)
+            movie_soup = BeautifulSoup(movie_resp.text, 'html.parser')
+            
+            best_link = get_best_link(movie_soup, movie_url)
+            if not best_link:
+                return "No 1080p link found for this movie", 404
             
         print(f"[*] Best Link Found: {best_link}")
 
@@ -668,7 +689,6 @@ def play_movie():
             hubcloud = best_link
 
         if hubcloud:
-            # Agar hblinks se hubdrive link aaya hai, toh usko convert karein
             if "hubdrive.blog" in hubcloud:
                 print(f"[*] Intermediate Hubdrive found: {hubcloud}")
                 hubcloud = extract_hubcloud_from_hubdrive(hubcloud)
