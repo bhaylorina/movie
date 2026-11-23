@@ -6,7 +6,7 @@ import re
 import time
 import urllib.parse
 import logging
-from urllib.parse import quote, unquote, urlsplit
+from urllib.parse import quote, unquote, urlsplit, urljoin
 from bs4 import BeautifulSoup
 from curl_cffi import requests as cffi_requests
 from flask import Flask, Response, redirect, request, render_template
@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
-# ================= RTDB REST SETUP (Hardcoded as requested) =================
+# ================= RTDB REST SETUP =================
 RTDB_URL = "https://movies-d584a-default-rtdb.firebaseio.com"
 RTDB_SECRET = "rs9zuVo5ndVNnyWjmgExnaCEbt91uLU56CKPvgF5"
 RTDB_PATH = "/saved_movies.json"
@@ -35,7 +35,7 @@ def is_safe_url(url):
     if not url: return False
     return any(domain in url.lower() for domain in TRUSTED_DOMAINS)
 
-# ================= B64 HELPERS (Optimized Padding) =================
+# ================= B64 HELPERS =================
 def safe_b64decode(data):
     try:
         if not data: return None
@@ -47,7 +47,7 @@ def safe_b64decode(data):
 def safe_b64encode(data):
     return base64.urlsafe_b64encode(data.encode()).decode()
 
-# ================= RTDB FUNCTIONS (Original) =================
+# ================= RTDB FUNCTIONS =================
 def _key(title): return safe_b64encode(title)
 
 def _rtdb_get():
@@ -94,7 +94,7 @@ session.headers.update({'User-Agent': UA})
 api_session = std_requests.Session()
 api_session.headers.update({"User-Agent": UA, "Origin": BASE_URL, "Referer": BASE_URL + "/"})
 
-# ================= ORIGINAL LOGIC (EXACTLY as provided) =================
+# ================= LOGIC FUNCTIONS =================
 def rot13(s):
     res = []
     for char in s:
@@ -122,7 +122,7 @@ def get_best_link(movie_soup, base_url):
         text = a_tag.get_text(strip=True)
         if "1080p" in text:
             href = a_tag['href']
-            if not href.startswith('http'): href = urllib.parse.urljoin(base_url, href)
+            if not href.startswith('http'): href = urljoin(base_url, href)
             size_match = re.search(r'(\d+(?:\.\d+)?)\s*(GB|MB)', text, re.I)
             size_gb = 0.0
             if size_match:
@@ -157,7 +157,7 @@ def extract_hubcloud_from_gadgets(url):
             if hubcloud_url:
                 if "hblinks" in hubcloud_url:
                     hb_resp = session.get(hubcloud_url, timeout=15)
-                    hb_soup = BeautifulSoup(hb_resp.text, 'lxml') # Optimized parser
+                    hb_soup = BeautifulSoup(hb_resp.text, 'lxml')
                     hubdrive_fallback = None
                     for a in hb_soup.find_all('a'):
                         text = a.get_text(strip=True).lower()
@@ -173,7 +173,7 @@ def extract_hubcloud_from_gadgets(url):
 def extract_hubcloud_from_hubdrive(url):
     try:
         resp = session.get(url, timeout=15)
-        soup = BeautifulSoup(resp.text, 'lxml') # Optimized parser
+        soup = BeautifulSoup(resp.text, 'lxml')
         for a in soup.find_all('a'):
             text = a.get_text(strip=True).lower()
             href = str(a.get('href', '')).lower()
@@ -191,7 +191,7 @@ def convert_pixeldrain_to_direct(url):
 def process_hubcloud(hubcloud_url):
     try:
         resp = session.get(hubcloud_url, timeout=15)
-        soup = BeautifulSoup(resp.text, 'lxml') # Optimized parser
+        soup = BeautifulSoup(resp.text, 'lxml')
         gen_btn = soup.find('a', id='download')
         if not gen_btn:
             for a in soup.find_all('a'):
@@ -200,10 +200,10 @@ def process_hubcloud(hubcloud_url):
                     gen_btn = a
                     break
         if not gen_btn or not gen_btn.get('href'): return None
-        gen_url = urllib.parse.urljoin(hubcloud_url, gen_btn['href'])
+        gen_url = urljoin(hubcloud_url, gen_btn['href'])
         gen_resp = session.get(gen_url, timeout=15)
         html_text = gen_resp.text.replace('&amp;', '&').replace('\\u0026', '&').replace('\u0026', '&')
-        gen_soup = BeautifulSoup(html_text, 'lxml') # Optimized parser
+        gen_soup = BeautifulSoup(html_text, 'lxml')
         for a in gen_soup.find_all('a'):
             text = a.get_text(strip=True).lower()
             href = a.get('href', '')
@@ -245,7 +245,7 @@ def process_hubcloud(hubcloud_url):
     except Exception: pass
     return None
 
-# ================= SEARCH & SAVED (Original) =================
+# ================= SEARCH & SAVED =================
 def get_valid_saved():
     global saved_movies
     load_saved_movies_from_cloud()
@@ -303,7 +303,7 @@ def wp_search(query):
         except Exception: pass
     return []
 
-# ================= FLASK ROUTES (Optimized with Jinja2) =================
+# ================= FLASK ROUTES =================
 @app.route('/')
 def home():
     saved_list = [{"title": t, "title_q": quote(t, safe="")} for t, d in get_valid_saved().items()]
@@ -376,7 +376,8 @@ def remove():
 def get_playlist():
     global m3u_cache
     now = time.time()
-    if m3u_cache["content"] and now < m3u_cache["expiry"]: categories_m3u = m3u_cache["content"]
+    if m3u_cache["content"] and now < m3u_cache["expiry"]: 
+        categories_m3u = m3u_cache["content"]
     else:
         categories = [("bollywood-movies", "Bollywood Movies"), ("south-hindi-movies", "South Hindi Movies")]
         m3u_temp = "#EXTM3U\n"
@@ -389,13 +390,20 @@ def get_playlist():
                     soup = BeautifulSoup(resp.text, 'lxml')
                     for a in soup.find_all('a', href=True):
                         t, h = a.get_text(strip=True), a['href']
-                        if not t or len(t) < 10 or BASE_URL not in h or h in seen_urls: continue
+                        if not t or len(t) < 10: continue
+                        
+                        # Convert relative URL to absolute URL
+                        full_url = urljoin(BASE_URL, h)
+                        
+                        if full_url in seen_urls: continue
                         if any(kw in t.lower() for kw in ["season", "ep-", "episode", "series"]): continue
-                        seen_urls.add(h)
-                        m3u_temp += f'#EXTINF:-1 group-title="{cat_name}",{t}\nhttps://{request.host}/play?url={safe_b64encode(h)}\n'
+                        
+                        seen_urls.add(full_url)
+                        m3u_temp += f'#EXTINF:-1 group-title="{cat_name}",{t}\nhttps://{request.host}/play?url={safe_b64encode(full_url)}\n'
                 except Exception: pass
         m3u_cache["content"], m3u_cache["expiry"] = m3u_temp, now + 3600
         categories_m3u = m3u_temp
+
     saved_part = "".join([f'#EXTINF:-1 group-title="⭐ Saved Movies",{t}\nhttps://{request.host}/play?url={safe_b64encode(d["url"])}\n' for t, d in get_valid_saved().items()])
     return Response(categories_m3u + saved_part, mimetype='audio/x-mpegurl')
 
@@ -405,7 +413,8 @@ def play_movie():
     movie_url = safe_b64decode(encoded_url)
     if not movie_url: return "Invalid URL", 400
     try:
-        if any(domain in movie_url for domain in ["greenmotors", "gadgetsweb", "hubdrive", "hubcdn", "hubcloud"]): best_link = movie_url
+        if any(domain in movie_url for domain in ["greenmotors", "gadgetsweb", "hubdrive", "hubcdn", "hubcloud"]): 
+            best_link = movie_url
         else:
             movie_resp = session.get(movie_url, timeout=15)
             best_link = get_best_link(BeautifulSoup(movie_resp.text, 'lxml'), movie_url)
