@@ -71,37 +71,40 @@ HEADERS = {
     "Connection": "keep-alive"
 }
 
-# 🟢 ROBUST REGEX: Yeh api/filesystem, api/file, u, l sabko handle karega aur sirf ID nikalega
-REGEX_PXL_ID = re.compile(r'pixeldrain\.(?:dev|com|net|eu\.cc)/(?:u/|api/file/|api/filesystem/u/|l/)?([a-zA-Z0-9]+)')
 REGEX_R2 = re.compile(r'https?://r2\.cloudflarestorage\.com/[^\s"\'<>]+')
-
 m3u_cache = {"content": None, "expiry": 0}
 SAVED_DURATION = 3 * 24 * 60 * 60 
 
 session = std_requests.Session()
 session.headers.update(HEADERS)
 
-# ================= 🟢 NEW BULLETPROOF CDN RESOLVER =================
+# ================= 🟢 BULLETPROOF HELPER FUNCTIONS =================
+def extract_pxl_id(url):
+    """Kisi bhi Pixeldrain URL se strictly 8-character ID nikalta hai"""
+    if not url or "pixeldrain" not in url: return None
+    url = url.split("?")[0] # Remove query params
+    
+    # Method 1: Strict Regex
+    match = re.search(r'pixeldrain\.[a-zA-Z\.]+/(?:u/|api/file/|api/filesystem/u/|l/)([a-zA-Z0-9]+)', url)
+    if match:
+        return match.group(1)
+        
+    # Method 2: String Splitting (Fallback)
+    parts = url.strip("/").split("/")
+    for part in reversed(parts):
+        if part.isalnum() and len(part) >= 6:
+            return part
+            
+    return None
+
 def resolve_pixeldrain_cdn(pxl_id):
-    """Exact cdnXX server nikalta hai bina kisi filesystem error ke."""
+    """Exact cdnXX server nikalta hai bina hotlink error ke."""
     clean_session = std_requests.Session()
-    # Referer nahi bhej rahe taaki hotlink detect na ho
     clean_session.headers.update({"User-Agent": UA, "Accept": "*/*"})
     
-    # Gateway 1: eu.cc
     try:
-        r = clean_session.head(f"https://cdn.pixeldrain.eu.cc/api/file/{pxl_id}", allow_redirects=False, timeout=10)
-        loc = r.headers.get("Location", "")
-        if loc:
-            parsed = urlsplit(loc)
-            if parsed.netloc and "cdn" in parsed.netloc and "pixeldrain" in parsed.netloc:
-                return f"https://{parsed.netloc}" # Returns: https://cdn23.pixeldrain.eu.cc
-    except Exception:
-        pass
-
-    # Gateway 2: Main API (Agar eu.cc fail ho jaye)
-    try:
-        r = clean_session.head(f"https://pixeldrain.com/api/file/{pxl_id}", allow_redirects=False, timeout=10)
+        # GET request use kar rahe hain kyunki kuch CDN HEAD allow nahi karte
+        r = clean_session.get(f"https://cdn.pixeldrain.eu.cc/api/file/{pxl_id}", allow_redirects=False, timeout=10)
         loc = r.headers.get("Location", "")
         if loc:
             parsed = urlsplit(loc)
@@ -110,7 +113,6 @@ def resolve_pixeldrain_cdn(pxl_id):
     except Exception:
         pass
         
-    # Fallback (Agar dono fail ho jayein, jo ki rare hai)
     return "https://cdn.pixeldrain.eu.cc"
 
 # ================= SNIPER LOGIC FUNCTIONS =================
@@ -342,14 +344,10 @@ def play_direct():
             if hubcloud:
                 final_link = process_hubcloud(hubcloud)
                 if final_link:
-                    pxl_match = REGEX_PXL_ID.search(final_link)
-                    if pxl_match:
-                        pxl_id = pxl_match.group(1)
-                        
-                        # 1. Exact cdnXX server resolve karo
+                    # 🟢 STRICTLY EXTRACT ID
+                    pxl_id = extract_pxl_id(final_link)
+                    if pxl_id:
                         cdn_base = resolve_pixeldrain_cdn(pxl_id)
-                        
-                        # 2. Strictly manual URL banao (No replace function)
                         viewer_on_cdn = f"{cdn_base}/u/{pxl_id}"
                         return redirect(viewer_on_cdn, code=302)
 
@@ -435,14 +433,10 @@ def play_movie():
             final_link = process_hubcloud(hubcloud)
             
             if final_link:
-                pxl_match = REGEX_PXL_ID.search(final_link)
-                if pxl_match:
-                    pxl_id = pxl_match.group(1)
-                    
-                    # 1. Exact cdnXX server resolve karo
+                # 🟢 STRICTLY EXTRACT ID
+                pxl_id = extract_pxl_id(final_link)
+                if pxl_id:
                     cdn_base = resolve_pixeldrain_cdn(pxl_id)
-                    
-                    # 2. Strictly manual URL banao (No replace function)
                     api_on_cdn = f"{cdn_base}/api/file/{pxl_id}"
                     return redirect(api_on_cdn, code=302)
 
