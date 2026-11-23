@@ -81,6 +81,25 @@ SAVED_DURATION = 3 * 24 * 60 * 60
 session = std_requests.Session()
 session.headers.update(HEADERS)
 
+# ================= NEW: PIXELDRAIN CDN RESOLVER =================
+def resolve_pixeldrain_cdn(pxl_id):
+    """Exact cdnXX server nikalta hai bina hotlink error ke"""
+    cdn_gateway = f"https://cdn.pixeldrain.eu.cc/api/file/{pxl_id}"
+    # Blank session taaki hotlink detect na ho (Referer nahi jayega)
+    clean_session = std_requests.Session()
+    clean_session.headers.update({"User-Agent": UA})
+    
+    try:
+        r = clean_session.get(cdn_gateway, allow_redirects=False, timeout=10)
+        loc = r.headers.get("Location", "")
+        if loc:
+            parsed_loc = urlsplit(loc)
+            if parsed_loc.netloc:
+                return f"{parsed_loc.scheme}://{parsed_loc.netloc}" # Returns: https://cdn23.pixeldrain.eu.cc
+    except Exception as e:
+        logger.error(f"CDN resolve error: {e}")
+    return "https://cdn.pixeldrain.eu.cc" # Fallback
+
 # ================= SNIPER LOGIC FUNCTIONS =================
 def rot13(s):
     res = []
@@ -284,7 +303,7 @@ def manual_links():
 
 @app.route("/play_direct")
 def play_direct():
-    """ BROWSER ROUTE: Force CDN Resolver to avoid hotlink error and get cdnXX.pixeldrain.eu.cc/u/ID """
+    """ BROWSER ROUTE: Gets exact cdnXX.pixeldrain.eu.cc/u/ID """
     encoded_url = request.args.get("url")
     if not encoded_url:
         return "No URL provided", 400
@@ -314,19 +333,11 @@ def play_direct():
                     if pxl_match:
                         pxl_id = pxl_match.group(1)
                         
-                        # Default fallback to Gateway (Never use pixeldrain.com)
-                        viewer_on_cdn = f"https://cdn.pixeldrain.eu.cc/u/{pxl_id}"
+                        # Get exact CDN domain (cdn23, cdn39, etc.)
+                        cdn_base = resolve_pixeldrain_cdn(pxl_id)
                         
-                        try:
-                            # Try to get exact cdnXX server
-                            cdn_api = f"https://cdn.pixeldrain.eu.cc/api/file/{pxl_id}"
-                            r = session.get(cdn_api, allow_redirects=False, timeout=5)
-                            loc = r.headers.get("Location", "")
-                            if "/api/file/" in loc:
-                                viewer_on_cdn = loc.replace("/api/file/", "/u/").split("?")[0]
-                        except Exception:
-                            pass # If fail, it will use the gateway fallback
-                            
+                        # Perfect URL for Browser UI
+                        viewer_on_cdn = f"{cdn_base}/u/{pxl_id}"
                         return redirect(viewer_on_cdn, code=302)
 
                     # FSL ya R2 link ke liye direct
@@ -389,7 +400,7 @@ def get_playlist():
 
 @app.route('/play')
 def play_movie():
-    """ PLAYER ROUTE: VLC/Tivimate ke liye direct stream link (/api/file/) """
+    """ PLAYER ROUTE: Gets exact cdnXX.pixeldrain.eu.cc/api/file/ID """
     encoded_url = request.args.get('url')
     movie_url = safe_b64decode(encoded_url)
     if not movie_url: return "Invalid URL", 400
@@ -415,18 +426,11 @@ def play_movie():
                 if pxl_match:
                     pxl_id = pxl_match.group(1)
                     
-                    # Default fallback to Gateway (Never use pixeldrain.com)
-                    api_on_cdn = f"https://cdn.pixeldrain.eu.cc/api/file/{pxl_id}"
+                    # Get exact CDN domain (cdn23, cdn39, etc.)
+                    cdn_base = resolve_pixeldrain_cdn(pxl_id)
                     
-                    try:
-                        # Try to get exact cdnXX server
-                        r = session.get(api_on_cdn, allow_redirects=False, timeout=5)
-                        loc = r.headers.get("Location", "")
-                        if "/api/file/" in loc:
-                            api_on_cdn = loc.split("?")[0]
-                    except Exception:
-                        pass # If fail, VLC will use the gateway fallback
-                        
+                    # Perfect URL for VLC Player (Bypasses limit directly via API)
+                    api_on_cdn = f"{cdn_base}/api/file/{pxl_id}"
                     return redirect(api_on_cdn, code=302)
 
                 return redirect(final_link, code=302)
