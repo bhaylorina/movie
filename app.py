@@ -4,6 +4,7 @@ import json
 import re
 import time
 import logging
+import traceback # Added for the new error handling
 from urllib.parse import quote, unquote, urlsplit, urljoin
 from bs4 import BeautifulSoup
 from flask import Flask, Response, redirect, request, render_template
@@ -281,9 +282,9 @@ def manual_links():
         return render_template('manual.html', title=title, links=formatted)
     except Exception as e: return f"Error: {e}", 500
 
+# ================= NEW PLAY_DIRECT LOGIC =================
 @app.route("/play_direct")
 def play_direct():
-    """ BROWSER ROUTE: Force CDN Resolver to avoid hotlink error and get cdnXX.pixeldrain.eu.cc/u/ID """
     encoded_url = request.args.get("url")
     if not encoded_url:
         return "No URL provided", 400
@@ -309,30 +310,30 @@ def play_direct():
             if hubcloud:
                 final_link = process_hubcloud(hubcloud)
                 if final_link:
-                    # Check if this is a PixelDrain link (any domain)
-                    pxl_match = REGEX_PXL_ID.search(final_link)
-                    if pxl_match:
-                        pxl_id = pxl_match.group(1)
-                        # FORCE the link to go through cdn.pixeldrain.eu.cc to find the actual server
-                        cdn_gateway = f"https://cdn.pixeldrain.eu.cc/api/file/{pxl_id}"
+                    # Agar link cdn.pixeldrain.eu.cc ka hai:
+                    if "cdn.pixeldrain.eu.cc/" in final_link:
                         try:
-                            r = session.get(cdn_gateway, allow_redirects=False, timeout=10)
+                            # Backend se pata karo ki konsa cdn server (cdn32, cdn50, etc.) mila hai
+                            r = session.get(
+                                final_link, allow_redirects=False, timeout=10
+                            )
                             loc = r.headers.get("Location", "")
                             if "/api/file/" in loc:
-                                # Convert the resolved cdnXX server link to viewer page /u/
+                                # Usi cdnXX.pixeldrain.eu.cc server ka viewer page (/u/) kholo
                                 viewer_on_cdn = loc.replace("/api/file/", "/u/")
                                 return redirect(viewer_on_cdn, code=302)
                         except Exception as e:
-                            logger.error(f"CDN resolve error: {e}")
-                            # Fallback to direct /u/ if resolver fails
-                            return redirect(f"https://pixeldrain.com/u/{pxl_id}", code=302)
+                            print(f"CDN resolve error: {e}")
 
-                    # For non-pixeldrain links (FSL, R2), redirect directly
+                    # FSL ya R2 link ke liye direct download
                     return redirect(final_link, code=302)
 
-        return "Failed to extract final link.", 500
+        return "Failed to extract final link from this specific URL.", 500
     except Exception as e:
-        return f"Error during extraction: {str(e)}", 500
+        return (
+            f"Error during extraction: {str(e)}\n{traceback.format_exc()}",
+            500,
+        )
 
 @app.route('/save', methods=['POST'])
 def save():
