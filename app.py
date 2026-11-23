@@ -19,8 +19,8 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 
 # ================= RTDB REST SETUP (Hardcoded as requested) =================
-RTDB_URL = "remove"
-RTDB_SECRET = "removegF5"
+RTDB_URL = "https://movies-d584a-default-rtdb.firebaseio.com"
+RTDB_SECRET = "rs9zuVo5ndVNnyWjmgExnaCEbt91uLU56CKPvgF5"
 RTDB_PATH = "/saved_movies.json"
 
 rtdb_session = std_requests.Session()
