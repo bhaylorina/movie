@@ -182,8 +182,10 @@ def extract_hubcloud_from_hubdrive(url):
 def convert_pixeldrain_to_direct(url):
     if not url: return None
     url = url.replace("&amp;", "&")
-    match = REGEX_GAME_DRIVE.search(url)
-    if match: return f"https://cdn.pixeldrain.eu.cc/{match.group(1)}"
+    # Ye regex /u/, /api/file/ ya /l/ sabko remove karke sirf ID nikalega
+    match = re.search(r'pixeldrain\.(?:dev|com|net|eu\.cc)/(?:u|api/file|l)/([a-zA-Z0-9]+)', url)
+    if match: 
+        return f"https://cdn.pixeldrain.eu.cc/{match.group(1)}"
     return url
 
 def process_hubcloud(hubcloud_url):
@@ -401,24 +403,25 @@ def play_movie():
             movie_resp = session.get(movie_url, timeout=15)
             best_link = get_best_link(BeautifulSoup(movie_resp.text, 'lxml'), movie_url)
             if not best_link: return "No 1080p link found", 404
+        
         hubcloud = None
-        if "greenmotors" in best_link or "gadgetsweb" in best_link: hubcloud = extract_hubcloud_from_gadgets(best_link)
-        elif "hubdrive.blog" in best_link: hubcloud = extract_hubcloud_from_hubdrive(best_link)
-        else: hubcloud = best_link
+        if "greenmotors" in best_link or "gadgetsweb" in best_link: 
+            hubcloud = extract_hubcloud_from_gadgets(best_link)
+        elif "hubdrive.blog" in best_link: 
+            hubcloud = extract_hubcloud_from_hubdrive(best_link)
+        else: 
+            hubcloud = best_link
+            
         if hubcloud:
-            if "hubdrive.blog" in hubcloud: hubcloud = extract_hubcloud_from_hubdrive(hubcloud)
+            if "hubdrive.blog" in hubcloud: 
+                hubcloud = extract_hubcloud_from_hubdrive(hubcloud)
             final_link = process_hubcloud(hubcloud)
             if final_link and is_safe_url(final_link): 
-                # Hotlink bypass for /play route as well
-                if "cdn.pixeldrain.eu.cc/" in final_link:
-                    try:
-                        r = session.get(final_link, allow_redirects=False, timeout=10)
-                        loc = r.headers.get("Location", "")
-                        if "/api/file/" in loc: return redirect(loc.replace("/api/file/", "/u/"), code=302)
-                    except Exception: pass
+                # Yahan se Hotlink Bypass remove kar diya hai taaki direct file link jaye
                 return redirect(final_link, code=302)
         return "Failed to extract final link", 500
-    except Exception: return "Error during extraction", 500
+    except Exception as e: 
+        return f"Error during extraction: {e}", 500
 
 if __name__ == '__main__':
     import os
