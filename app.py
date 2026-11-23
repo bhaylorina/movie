@@ -23,7 +23,7 @@ RTDB_URL = "https://movies-d584a-default-rtdb.firebaseio.com"
 RTDB_SECRET = "rs9zuVo5ndVNnyWjmgExnaCEbt91uLU56CKPvgF5"
 RTDB_PATH = "/saved_movies.json"
 
-# ⚡ SPEED FIX 1: Persistent Session for Firebase (Saves ~400ms SSL handshake per call)
+# ⚡ Persistent Session for Firebase
 rtdb_session = std_requests.Session()
 
 
@@ -102,6 +102,12 @@ REGEX_GAME_DRIVE = re.compile(
 )
 REGEX_R2 = re.compile(r'https?://[^\s"\'<>]+\.r2\.cloudflarestorage\.com/[^\s"\'<>]+')
 
+# 🔥 FILTER REGEX FOR M3U PLAYLIST ONLY (Blocks Season 1, S01, Episode 1, Ep-01, Series, etc.)
+REGEX_SERIES_EXCLUDE = re.compile(
+    r"(?:\bseason\b|\bs\d{1,2}\b|\bep(?:isode)?[\s.-]*\d+|\bweb[\s-]*series\b|\bseries\b|\ball\s*episodes\b|how\s*to\s*download|telegram)",
+    re.I,
+)
+
 m3u_cache = {"content": None, "expiry": 0}
 SAVED_DURATION = 3 * 24 * 60 * 60
 
@@ -140,7 +146,6 @@ def decrypt_token(token):
 
 def get_best_link(movie_soup, base_url):
     candidates = []
-    # 🐛 BUG FIX: Check all 'a' tags instead of only 'h3'/'h4'
     for a_tag in movie_soup.find_all("a", href=True):
         text = a_tag.get_text(strip=True)
         if "1080p" in text:
@@ -331,7 +336,7 @@ def resolve_final_link(target_url):
     return None
 
 
-# ================= SEARCH & SAVED =================
+# ================= SEARCH & SAVED (NO FILTER ON SEARCH) =================
 def get_valid_saved():
     data = _rtdb_get()
     if not data:
@@ -376,7 +381,6 @@ def typesense_search(query):
         "sort_by": "_text_match:desc",
         "per_page": 50,
     }
-    # 🐛 BUG FIX: Added Origin and Referer required by Pingora Typesense API
     api_headers = {"Origin": BASE_URL, "Referer": BASE_URL + "/"}
     try:
         resp = session.get(
@@ -436,6 +440,7 @@ def search():
     query = request.args.get("q", "").strip()
     if not query:
         return redirect("/")
+    # No filter here - all movies, seasons, and series will appear in search
     results = typesense_search(query) or wp_search(query)
     formatted = [
         {
@@ -541,7 +546,7 @@ def remove():
 
 
 def _fetch_category_page(args):
-    """⚡ Helper for parallel M3U page scraping"""
+    """⚡ Helper for parallel M3U page scraping (Filters out all Seasons/Series)"""
     cat_url, cat_name, page, host = args
     items = []
     try:
@@ -556,6 +561,15 @@ def _fetch_category_page(args):
                 if not a_tag:
                     continue
                 t, h = a_tag.get_text(strip=True), a_tag["href"]
+                if not t or len(t) < 5:
+                    continue
+
+                # 🔥 FILTER: Skip all Seasons, Episodes, Shows, and Series in M3U folders
+                if REGEX_SERIES_EXCLUDE.search(
+                    t
+                ) or REGEX_SERIES_EXCLUDE.search(h):
+                    continue
+
                 logo = img_tag["src"] if img_tag and img_tag.get("src") else ""
                 full_url = urljoin(BASE_URL, h)
                 items.append((full_url, logo, cat_name, t))
@@ -584,7 +598,6 @@ def get_playlist():
         m3u_temp = "#EXTM3U\n"
         seen_urls = set()
 
-        # ⚡ SPEED FIX 2: Fetch all 8 pages in parallel (~1.5s total instead of ~10s)
         with ThreadPoolExecutor(max_workers=8) as executor:
             results = executor.map(_fetch_category_page, tasks)
             for page_items in results:
