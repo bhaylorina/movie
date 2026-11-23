@@ -282,12 +282,11 @@ def manual_links():
 
 @app.route("/play_direct")
 def play_direct():
-    """ BROWSER ROUTE: Exact Dynamic CDN Resolver Logic to bypass hotlink error. """
+    """ BROWSER ROUTE: Exact Original CDN Resolver Logic to avoid Hotlink error. """
     encoded_url = request.args.get("url")
     if not encoded_url:
         return "No URL provided", 400
 
-    # Manual Padding and Decoding (Exact as provided)
     encoded_url += "=" * ((4 - len(encoded_url) % 4) % 4)
     try:
         target_url = base64.urlsafe_b64decode(encoded_url.encode()).decode()
@@ -309,19 +308,16 @@ def play_direct():
             if hubcloud:
                 final_link = process_hubcloud(hubcloud)
                 if final_link:
-                    # Logic: If link is from cdn.pixeldrain.eu.cc, resolve actual server to avoid hotlink
                     if "cdn.pixeldrain.eu.cc/" in final_link:
                         try:
                             r = session.get(final_link, allow_redirects=False, timeout=10)
                             loc = r.headers.get("Location", "")
                             if "/api/file/" in loc:
-                                # Transform /api/file/ -> /u/ on the resolved server (e.g. cdn32)
                                 viewer_on_cdn = loc.replace("/api/file/", "/u/")
                                 return redirect(viewer_on_cdn, code=302)
                         except Exception as e:
                             logger.error(f"CDN resolve error: {e}")
 
-                    # If it's FSL or R2, redirect directly
                     return redirect(final_link, code=302)
 
         return "Failed to extract final link from this specific URL.", 500
