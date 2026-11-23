@@ -81,25 +81,6 @@ SAVED_DURATION = 3 * 24 * 60 * 60
 session = std_requests.Session()
 session.headers.update(HEADERS)
 
-# ================= NEW: PIXELDRAIN CDN RESOLVER =================
-def resolve_pixeldrain_cdn(pxl_id):
-    """Exact cdnXX server nikalta hai bina hotlink error ke"""
-    cdn_gateway = f"https://cdn.pixeldrain.eu.cc/api/file/{pxl_id}"
-    # Blank session taaki hotlink detect na ho (Referer nahi jayega)
-    clean_session = std_requests.Session()
-    clean_session.headers.update({"User-Agent": UA})
-    
-    try:
-        r = clean_session.get(cdn_gateway, allow_redirects=False, timeout=10)
-        loc = r.headers.get("Location", "")
-        if loc:
-            parsed_loc = urlsplit(loc)
-            if parsed_loc.netloc:
-                return f"{parsed_loc.scheme}://{parsed_loc.netloc}" # Returns: https://cdn23.pixeldrain.eu.cc
-    except Exception as e:
-        logger.error(f"CDN resolve error: {e}")
-    return "https://cdn.pixeldrain.eu.cc" # Fallback
-
 # ================= SNIPER LOGIC FUNCTIONS =================
 def rot13(s):
     res = []
@@ -303,7 +284,7 @@ def manual_links():
 
 @app.route("/play_direct")
 def play_direct():
-    """ BROWSER ROUTE: Gets exact cdnXX.pixeldrain.eu.cc/u/ID """
+    """ BROWSER ROUTE: Gets cdnXX.pixeldrain.eu.cc/u/ID """
     encoded_url = request.args.get("url")
     if not encoded_url:
         return "No URL provided", 400
@@ -333,10 +314,23 @@ def play_direct():
                     if pxl_match:
                         pxl_id = pxl_match.group(1)
                         
-                        # Get exact CDN domain (cdn23, cdn39, etc.)
-                        cdn_base = resolve_pixeldrain_cdn(pxl_id)
+                        # Default fallback to main gateway
+                        cdn_base = "https://cdn.pixeldrain.eu.cc"
                         
-                        # Perfect URL for Browser UI
+                        try:
+                            # Backend check to find exact cdnXX domain
+                            cdn_api = f"https://cdn.pixeldrain.eu.cc/api/file/{pxl_id}"
+                            r = session.get(cdn_api, allow_redirects=False, timeout=5)
+                            loc = r.headers.get("Location", "")
+                            if loc:
+                                # Extract just the domain (e.g., https://cdn23.pixeldrain.eu.cc)
+                                parsed_loc = urlsplit(loc)
+                                if parsed_loc.netloc:
+                                    cdn_base = f"{parsed_loc.scheme}://{parsed_loc.netloc}"
+                        except Exception:
+                            pass
+                            
+                        # Construct perfect URL for browser
                         viewer_on_cdn = f"{cdn_base}/u/{pxl_id}"
                         return redirect(viewer_on_cdn, code=302)
 
@@ -400,7 +394,7 @@ def get_playlist():
 
 @app.route('/play')
 def play_movie():
-    """ PLAYER ROUTE: Gets exact cdnXX.pixeldrain.eu.cc/api/file/ID """
+    """ PLAYER ROUTE: Gets cdnXX.pixeldrain.eu.cc/api/file/ID """
     encoded_url = request.args.get('url')
     movie_url = safe_b64decode(encoded_url)
     if not movie_url: return "Invalid URL", 400
@@ -426,10 +420,22 @@ def play_movie():
                 if pxl_match:
                     pxl_id = pxl_match.group(1)
                     
-                    # Get exact CDN domain (cdn23, cdn39, etc.)
-                    cdn_base = resolve_pixeldrain_cdn(pxl_id)
+                    # Default fallback to main gateway
+                    cdn_base = "https://cdn.pixeldrain.eu.cc"
                     
-                    # Perfect URL for VLC Player (Bypasses limit directly via API)
+                    try:
+                        # Backend check to find exact cdnXX domain
+                        cdn_api = f"https://cdn.pixeldrain.eu.cc/api/file/{pxl_id}"
+                        r = session.get(cdn_api, allow_redirects=False, timeout=5)
+                        loc = r.headers.get("Location", "")
+                        if loc:
+                            parsed_loc = urlsplit(loc)
+                            if parsed_loc.netloc:
+                                cdn_base = f"{parsed_loc.scheme}://{parsed_loc.netloc}"
+                    except Exception:
+                        pass
+                        
+                    # Construct perfect URL for Player
                     api_on_cdn = f"{cdn_base}/api/file/{pxl_id}"
                     return redirect(api_on_cdn, code=302)
 
