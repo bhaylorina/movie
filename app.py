@@ -4,7 +4,7 @@ import json
 import re
 import time
 import logging
-import traceback # Added for the new error handling
+import traceback
 from urllib.parse import quote, unquote, urlsplit, urljoin
 from bs4 import BeautifulSoup
 from flask import Flask, Response, redirect, request, render_template
@@ -80,6 +80,19 @@ SAVED_DURATION = 3 * 24 * 60 * 60
 
 session = std_requests.Session()
 session.headers.update(HEADERS)
+
+# ================= CDN RESOLVER HELPER =================
+def resolve_pixeldrain_cdn(pxl_id):
+    """Yeh function exact cdnXX.pixeldrain.eu.cc server find karta hai"""
+    cdn_gateway = f"https://cdn.pixeldrain.eu.cc/api/file/{pxl_id}"
+    try:
+        r = session.get(cdn_gateway, allow_redirects=False, timeout=10)
+        loc = r.headers.get("Location", "")
+        if "/api/file/" in loc:
+            return loc  # Returns: https://cdnXX.pixeldrain.eu.cc/api/file/ID
+    except Exception as e:
+        logger.error(f"CDN resolve error: {e}")
+    return None
 
 # ================= SNIPER LOGIC FUNCTIONS =================
 def rot13(s):
@@ -282,9 +295,9 @@ def manual_links():
         return render_template('manual.html', title=title, links=formatted)
     except Exception as e: return f"Error: {e}", 500
 
-# ================= NEW PLAY_DIRECT LOGIC =================
 @app.route("/play_direct")
 def play_direct():
+    """ BROWSER ROUTE: Force CDN Resolver to avoid hotlink error and get cdnXX.pixeldrain.eu.cc/u/ID """
     encoded_url = request.args.get("url")
     if not encoded_url:
         return "No URL provided", 400
@@ -310,30 +323,26 @@ def play_direct():
             if hubcloud:
                 final_link = process_hubcloud(hubcloud)
                 if final_link:
-                    # Agar link cdn.pixeldrain.eu.cc ka hai:
-                    if "cdn.pixeldrain.eu.cc/" in final_link:
-                        try:
-                            # Backend se pata karo ki konsa cdn server (cdn32, cdn50, etc.) mila hai
-                            r = session.get(
-                                final_link, allow_redirects=False, timeout=10
-                            )
-                            loc = r.headers.get("Location", "")
-                            if "/api/file/" in loc:
-                                # Usi cdnXX.pixeldrain.eu.cc server ka viewer page (/u/) kholo
-                                viewer_on_cdn = loc.replace("/api/file/", "/u/")
-                                return redirect(viewer_on_cdn, code=302)
-                        except Exception as e:
-                            print(f"CDN resolve error: {e}")
+                    # BROWSER LOGIC: /u/ chaiye hotlink error hatane ke liye
+                    pxl_match = REGEX_PXL_ID.search(final_link)
+                    if pxl_match:
+                        pxl_id = pxl_match.group(1)
+                        resolved_api_link = resolve_pixeldrain_cdn(pxl_id)
+                        
+                        if resolved_api_link:
+                            # https://cdnXX.../api/file/ID  ko  https://cdnXX.../u/ID  mein badla
+                            viewer_on_cdn = resolved_api_link.replace("/api/file/", "/u/")
+                            return redirect(viewer_on_cdn, code=302)
+                            
+                        # Agar CDN fail ho jaye toh fallback
+                        return redirect(f"https://pixeldrain.com/u/{pxl_id}", code=302)
 
-                    # FSL ya R2 link ke liye direct download
+                    # FSL ya R2 link ke liye direct
                     return redirect(final_link, code=302)
 
         return "Failed to extract final link from this specific URL.", 500
     except Exception as e:
-        return (
-            f"Error during extraction: {str(e)}\n{traceback.format_exc()}",
-            500,
-        )
+        return f"Error during extraction: {str(e)}\n{traceback.format_exc()}", 500
 
 @app.route('/save', methods=['POST'])
 def save():
@@ -388,7 +397,7 @@ def get_playlist():
 
 @app.route('/play')
 def play_movie():
-    """ PLAYER ROUTE: Direct file link for VLC/Tivimate. """
+    """ PLAYER ROUTE: VLC/Tivimate ke liye direct stream link (/api/file/) """
     encoded_url = request.args.get('url')
     movie_url = safe_b64decode(encoded_url)
     if not movie_url: return "Invalid URL", 400
@@ -408,10 +417,21 @@ def play_movie():
         if hubcloud:
             if "hubdrive.blog" in hubcloud: hubcloud = extract_hubcloud_from_hubdrive(hubcloud)
             final_link = process_hubcloud(hubcloud)
+            
             if final_link:
-                if "pixeldrain" in final_link:
-                    match = REGEX_PXL_ID.search(final_link)
-                    if match: return redirect(f"https://cdn.pixeldrain.eu.cc/{match.group(1)}", code=302)
+                # PLAYER LOGIC: VLC ko /api/file/ chaiye play hone ke liye
+                pxl_match = REGEX_PXL_ID.search(final_link)
+                if pxl_match:
+                    pxl_id = pxl_match.group(1)
+                    resolved_api_link = resolve_pixeldrain_cdn(pxl_id)
+                    
+                    if resolved_api_link:
+                        # VLC ko direct stream link de rahe hain
+                        return redirect(resolved_api_link, code=302)
+                        
+                    # Fallback
+                    return redirect(f"https://pixeldrain.com/api/file/{pxl_id}", code=302)
+
                 return redirect(final_link, code=302)
         return "Failed to extract final link", 500
     except Exception as e: 
