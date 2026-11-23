@@ -37,7 +37,6 @@ def _key(title): return safe_b64encode(title)
 
 def _rtdb_get():
     try:
-        # Fresh request for RTDB to avoid session issues
         r = std_requests.get(RTDB_URL + RTDB_PATH, params={"auth": RTDB_SECRET}, timeout=10)
         return r.json() if r.status_code == 200 else None
     except Exception as e: 
@@ -122,6 +121,16 @@ def get_best_link(movie_soup, base_url):
         return 3
     candidates.sort(key=sort_key)
     return candidates[0]['href']
+
+def get_all_links(movie_soup):
+    links = []
+    for a_tag in movie_soup.find_all('a', href=True):
+        href = a_tag['href']
+        text = a_tag.get_text(strip=True)
+        if any(domain in href for domain in ["greenmotors", "gadgetsweb", "hubdrive", "hubcdn", "hubcloud"]):
+            if text and len(text) > 2 and "WATCH" not in text.upper() and "PLAYER" not in text.upper():
+                links.append({"text": text, "url": href})
+    return links
 
 def extract_hubcloud_from_gadgets(url):
     try:
@@ -261,6 +270,21 @@ def search():
     formatted = [{"title": m["title"], "enc_url": safe_b64encode(m["url"]), "title_q": quote(m["title"], safe="")} for m in results]
     return render_template('search.html', query=query, results=formatted)
 
+@app.route('/manual')
+def manual_links():
+    """ RESTORED ROUTE: Handles 'Get Links' from search results. """
+    encoded_url = request.args.get('url')
+    title = unquote(request.args.get('title', 'Movie Links'))
+    movie_url = safe_b64decode(encoded_url)
+    if not movie_url: return "Invalid URL", 400
+    try:
+        resp = std_requests.get(movie_url, headers=HEADERS, timeout=15)
+        soup = BeautifulSoup(resp.text, 'lxml')
+        links = get_all_links(soup)
+        formatted = [{"text": l['text'], "enc_url": safe_b64encode(l['url']), "title_q": quote(f"{title} - {l['text']}", safe="")} for l in links]
+        return render_template('manual.html', title=title, links=formatted)
+    except Exception as e: return f"Error: {e}", 500
+
 @app.route("/play_direct")
 def play_direct():
     encoded_url = request.args.get("url")
@@ -308,7 +332,7 @@ def get_playlist():
         m3u_temp = "#EXTM3U\n"
         seen_urls = set()
         for cat_url, cat_name in categories:
-            for page in range(1, 5): # Reduced pages for faster loading
+            for page in range(1, 5):
                 try:
                     resp = std_requests.get(f"{BASE_URL}/category/{cat_url}/page/{page}/", headers=HEADERS, timeout=10)
                     if resp.status_code != 200: continue
