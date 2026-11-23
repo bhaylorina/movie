@@ -16,8 +16,8 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 
 # ================= RTDB REST SETUP =================
-RTDB_URL = "https://movies-d584a-default-rtdb.firebaseio.com" # Replace with your RTDB URL
-RTDB_SECRET = "rs9zuVo5ndVNnyWjmgExnaCEbt91uLU56CKPvgF5" # Replace with your RTDB Secret
+RTDB_URL = "https://movies-d584a-default-rtdb.firebaseio.com" 
+RTDB_SECRET = "rs9zuVo5ndVNnyWjmgExnaCEbt91uLU56CKPvgF5" 
 RTDB_PATH = "/saved_movies.json"
 
 # ================= B64 HELPERS =================
@@ -70,6 +70,7 @@ HEADERS = {
     "Connection": "keep-alive"
 }
 
+# Exact ID extractor for any PixelDrain domain
 REGEX_PXL_ID = re.compile(r'pixeldrain\.(?:dev|com|net|eu\.cc)/(?:u|api/file|l)/([a-zA-Z0-9]+)')
 REGEX_R2 = re.compile(r'https?://r2\.cloudflarestorage\.com/[^\s"\'<>]+')
 
@@ -282,7 +283,7 @@ def manual_links():
 
 @app.route("/play_direct")
 def play_direct():
-    """ BROWSER ROUTE: Exact Original CDN Resolver Logic to avoid Hotlink error. """
+    """ BROWSER ROUTE: Force CDN Resolver to avoid hotlink error and get cdnXX.pixeldrain.eu.cc/u/ID """
     encoded_url = request.args.get("url")
     if not encoded_url:
         return "No URL provided", 400
@@ -308,19 +309,28 @@ def play_direct():
             if hubcloud:
                 final_link = process_hubcloud(hubcloud)
                 if final_link:
-                    if "cdn.pixeldrain.eu.cc/" in final_link:
+                    # Check if this is a PixelDrain link (any domain)
+                    pxl_match = REGEX_PXL_ID.search(final_link)
+                    if pxl_match:
+                        pxl_id = pxl_match.group(1)
+                        # FORCE the link to go through cdn.pixeldrain.eu.cc to find the actual server
+                        cdn_gateway = f"https://cdn.pixeldrain.eu.cc/api/file/{pxl_id}"
                         try:
-                            r = session.get(final_link, allow_redirects=False, timeout=10)
+                            r = session.get(cdn_gateway, allow_redirects=False, timeout=10)
                             loc = r.headers.get("Location", "")
                             if "/api/file/" in loc:
+                                # Convert the resolved cdnXX server link to viewer page /u/
                                 viewer_on_cdn = loc.replace("/api/file/", "/u/")
                                 return redirect(viewer_on_cdn, code=302)
                         except Exception as e:
                             logger.error(f"CDN resolve error: {e}")
+                            # Fallback to direct /u/ if resolver fails
+                            return redirect(f"https://pixeldrain.com/u/{pxl_id}", code=302)
 
+                    # For non-pixeldrain links (FSL, R2), redirect directly
                     return redirect(final_link, code=302)
 
-        return "Failed to extract final link from this specific URL.", 500
+        return "Failed to extract final link.", 500
     except Exception as e:
         return f"Error during extraction: {str(e)}", 500
 
