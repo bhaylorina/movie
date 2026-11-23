@@ -114,26 +114,21 @@ def decrypt_token(token):
     return None
 
 def get_best_link(movie_soup, base_url):
-    """SNIPER MODE: Targets only h3 and h4 tags where download links reside."""
     candidates = []
     for tag in movie_soup.find_all(['h3', 'h4']):
         a_tag = tag.find('a', href=True)
         if not a_tag: continue
-        
         text = a_tag.get_text(strip=True)
         if "1080p" in text:
             href = a_tag['href']
             if not href.startswith('http'): href = urljoin(base_url, href)
-            
             size_match = re.search(r'(\d+(?:\.\d+)?)\s*(GB|MB)', text, re.I)
             size_gb = 0.0
             if size_match:
                 val = float(size_match.group(1))
                 unit = size_match.group(2).upper()
                 size_gb = val / 1024 if unit == 'MB' else val
-            
             if size_gb > 0: candidates.append({'href': href, 'text': text, 'size': size_gb})
-    
     if not candidates: return None
     def sort_key(c):
         if 2.0 <= c['size'] <= 6.0: return 1
@@ -192,55 +187,36 @@ def convert_pixeldrain_to_direct(url):
     return url
 
 def process_hubcloud(hubcloud_url):
-    """SNIPER MODE: Uses IDs and JS extraction to avoid 'andhera' and fake links."""
     try:
         resp = session.get(hubcloud_url, timeout=15)
         html_text = resp.text
         soup = BeautifulSoup(html_text, 'lxml')
-        
-        # 1. Target Generate Button
         gen_btn = soup.find('a', id='download')
         if not gen_btn:
             for a in soup.find_all('a'):
                 if 'generate' in a.get_text().lower() and 'download' in a.get_text().lower():
                     gen_btn = a
                     break
-        
         if not gen_btn or not gen_btn.get('href'): return None
-        
         gen_url = urljoin(hubcloud_url, gen_btn['href'])
         gen_resp = session.get(gen_url, timeout=15)
         gen_html = gen_resp.text
         gen_soup = BeautifulSoup(gen_html, 'lxml')
         
-        # --- START SNIPER EXTRACTION ---
-        
-        # Priority 1: S3 / FSLv2 Server (The best link)
         s3_btn = gen_soup.find('a', id='s3')
-        if s3_btn and s3_btn.get('href'):
-            return s3_btn['href']
-        
-        # Priority 2: FSL Server
+        if s3_btn and s3_btn.get('href'): return s3_btn['href']
         fsl_btn = gen_soup.find('a', id='fsl')
-        if fsl_btn and fsl_btn.get('href'):
-            return fsl_btn['href']
-            
-        # Priority 3: PixelDrain (Handling the JS Trick)
+        if fsl_btn and fsl_btn.get('href'): return fsl_btn['href']
         pxl_btn = gen_soup.find('a', id='pxl-1')
         if pxl_btn:
-            # Search for 'var pxl = "..."' in script tags to avoid fake 'negn6f' links
             pxl_js_match = re.search(r"var pxl\s*=\s*['\"]([^'\"]+)['\"]", gen_html)
-            if pxl_js_match:
-                return convert_pixeldrain_to_direct(pxl_js_match.group(1))
+            if pxl_js_match: return convert_pixeldrain_to_direct(pxl_js_match.group(1))
             return convert_pixeldrain_to_direct(pxl_btn.get('href'))
-            
-        # Priority 4: Fallback to Regex (just in case structure changes)
         all_r2_links = REGEX_R2.findall(gen_html)
         if all_r2_links:
             for link in all_r2_links:
                 if 'X-Amz-Expires=28800' in link: return link
             return all_r2_links[0]
-            
         return None
     except Exception: pass
     return None
@@ -345,6 +321,17 @@ def play_direct():
             if "hubdrive.blog" in hubcloud: hubcloud = extract_hubcloud_from_hubdrive(hubcloud)
             final_link = process_hubcloud(hubcloud)
             if final_link and is_safe_url(final_link):
+                # ================= HOTLINK BYPASS RESTORED =================
+                if "cdn.pixeldrain.eu.cc/" in final_link:
+                    try:
+                        # PixelDrain direct API links give hotlink error. 
+                        # We convert /api/file/ to /u/ (viewer page) to bypass it.
+                        r = session.get(final_link, allow_redirects=False, timeout=10)
+                        loc = r.headers.get("Location", "")
+                        if "/api/file/" in loc: 
+                            return redirect(loc.replace("/api/file/", "/u/"), code=302)
+                    except Exception: pass
+                # ==========================================================
                 return redirect(final_link, code=302)
         return "Failed to extract link", 500
     except Exception: return "Error during extraction", 500
@@ -421,7 +408,15 @@ def play_movie():
         if hubcloud:
             if "hubdrive.blog" in hubcloud: hubcloud = extract_hubcloud_from_hubdrive(hubcloud)
             final_link = process_hubcloud(hubcloud)
-            if final_link and is_safe_url(final_link): return redirect(final_link, code=302)
+            if final_link and is_safe_url(final_link): 
+                # Hotlink bypass for /play route as well
+                if "cdn.pixeldrain.eu.cc/" in final_link:
+                    try:
+                        r = session.get(final_link, allow_redirects=False, timeout=10)
+                        loc = r.headers.get("Location", "")
+                        if "/api/file/" in loc: return redirect(loc.replace("/api/file/", "/u/"), code=302)
+                    except Exception: pass
+                return redirect(final_link, code=302)
         return "Failed to extract final link", 500
     except Exception: return "Error during extraction", 500
 
