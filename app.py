@@ -6,9 +6,8 @@ import re
 import time
 import urllib.parse
 import logging
-from urllib.parse import quote, unquote, urlsplit, urljoin
+from urllib.parse import quote, unquote, urlsplit, urljoin, urlparse
 from bs4 import BeautifulSoup
-from curl_cffi import requests as cffi_requests
 from flask import Flask, Response, redirect, request, render_template
 import requests as std_requests
 
@@ -19,21 +18,11 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 
 # ================= RTDB REST SETUP =================
-RTDB_URL = "https://movies-d584a-default-rtdb.firebaseio.com"
-RTDB_SECRET = "rs9zuVo5ndVNnyWjmgExnaCEbt91uLU56CKPvgF5"
+RTDB_URL = "https://movies-d584a-default-rtdb.firebaseio.com" # Replace with your RTDB URL
+RTDB_SECRET = "rs9zuVo5ndVNnyWjmgExnaCEbt91uLU56CKPvgF5" # Replace with your RTDB Secret
 RTDB_PATH = "/saved_movies.json"
 
 rtdb_session = std_requests.Session()
-
-# ================= SECURITY: Domain Validation =================
-TRUSTED_DOMAINS = [
-    "pixeldrain.com", "pixeldrain.dev", "pixeldrain.net", "pixeldrain.eu.cc",
-    "r2.cloudflarestorage.com", "hubcloud.com", "hubcloud.mov", "hubdrive.blog"
-]
-
-def is_safe_url(url):
-    if not url: return False
-    return any(domain in url.lower() for domain in TRUSTED_DOMAINS)
 
 # ================= B64 HELPERS =================
 def safe_b64decode(data):
@@ -52,21 +41,27 @@ def _key(title): return safe_b64encode(title)
 
 def _rtdb_get():
     try:
-        r = rtdb_session.get(RTDB_URL + RTDB_PATH, params={"auth": RTDB_SECRET}, timeout=20)
+        r = rtdb_session.get(RTDB_URL + RTDB_PATH, params={"auth": RTDB_SECRET}, timeout=15)
         return r.json() if r.status_code == 200 else None
-    except Exception: return None
+    except Exception as e: 
+        logger.error(f"RTDB Get Error: {e}")
+        return None
 
 def _rtdb_patch(payload):
     try:
-        r = rtdb_session.patch(RTDB_URL + RTDB_PATH, params={"auth": RTDB_SECRET}, json=payload, timeout=20)
+        r = rtdb_session.patch(RTDB_URL + RTDB_PATH, params={"auth": RTDB_SECRET}, json=payload, timeout=15)
         return r.status_code == 200
-    except Exception: return False
+    except Exception as e: 
+        logger.error(f"RTDB Patch Error: {e}")
+        return False
 
 def _rtdb_delete(key):
     try:
-        r = rtdb_session.delete(f"{RTDB_URL}/saved_movies/{key}.json", params={"auth": RTDB_SECRET}, timeout=20)
+        r = rtdb_session.delete(f"{RTDB_URL}/saved_movies/{key}.json", params={"auth": RTDB_SECRET}, timeout=15)
         return r.status_code == 200
-    except Exception: return False
+    except Exception as e: 
+        logger.error(f"RTDB Delete Error: {e}")
+        return False
 
 def load_saved_movies_from_cloud():
     global saved_movies
@@ -76,20 +71,32 @@ def load_saved_movies_from_cloud():
 
 # ================= SCRAPER CONFIG =================
 BASE_URL = "https://new15.hdhub4u.cl"
+# High-quality realistic browser User-Agent
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+HEADERS = {
+    "User-Agent": UA,
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Connection": "keep-alive",
+    "Upgrade-Insecure-Requests": "1",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Sec-Fetch-User": "?1",
+}
 
-REGEX_PIXELDRAIN = re.compile(r'pixeldrain\.(?:dev|com)/u/([a-zA-Z0-9]+)')
-REGEX_GAME_DRIVE = re.compile(r'https?://(?:pixeldra\.in|pixeldrain\.com|pixeldrain\.net|pixeldrain\.dev)/(?:u|api/file|l)/([^?\s]+)')
+# REGEX DEFINITIONS
+REGEX_PIXELDRAIN = re.compile(r'pixeldrain\.(?:dev|com|net|eu\.cc)/(?:u|api/file|l)/([a-zA-Z0-9]+)')
+REGEX_R2 = re.compile(r'https?://r2\.cloudflarestorage\.com/[^\s"\'<>]+')
 
 m3u_cache = {"content": None, "expiry": 0}
 saved_movies = {}
 SAVED_DURATION = 3 * 24 * 60 * 60 
 
-session = cffi_requests.Session(impersonate="chrome110")
-session.headers.update({'User-Agent': UA})
-
-api_session = std_requests.Session()
-api_session.headers.update({"User-Agent": UA, "Origin": BASE_URL, "Referer": BASE_URL + "/"})
+# Using a single session for everything to maximize speed via connection pooling
+session = std_requests.Session()
+session.headers.update(HEADERS)
 
 # ================= SNIPER LOGIC FUNCTIONS =================
 def rot13(s):
@@ -165,7 +172,7 @@ def extract_hubcloud_from_gadgets(url):
                         if 'hubdrive' in text or 'hubdrive' in href: hubdrive_fallback = a['href']
                     if hubdrive_fallback: return hubdrive_fallback
                 return hubcloud_url
-    except Exception: pass
+    except Exception as e: logger.error(f"Gadgets Extraction Error: {e}")
     return None
 
 def extract_hubcloud_from_hubdrive(url):
@@ -176,14 +183,14 @@ def extract_hubcloud_from_hubdrive(url):
             text = a.get_text(strip=True).lower()
             href = str(a.get('href', '')).lower()
             if 'hubcloud' in text or 'hubcloud' in href: return a['href']
-    except Exception: pass
+    except Exception as e: logger.error(f"Hubdrive Extraction Error: {e}")
     return None
 
 def convert_pixeldrain_to_direct(url):
+    """ Converts any PixelDrain link to a direct file link for Player. """
     if not url: return None
     url = url.replace("&amp;", "&")
-    # Ye regex /u/, /api/file/ ya /l/ sabko remove karke sirf ID nikalega
-    match = re.search(r'pixeldrain\.(?:dev|com|net|eu\.cc)/(?:u|api/file|l)/([a-zA-Z0-9]+)', url)
+    match = REGEX_PIXELDRAIN.search(url)
     if match: 
         return f"https://cdn.pixeldrain.eu.cc/{match.group(1)}"
     return url
@@ -214,13 +221,14 @@ def process_hubcloud(hubcloud_url):
             pxl_js_match = re.search(r"var pxl\s*=\s*['\"]([^'\"]+)['\"]", gen_html)
             if pxl_js_match: return convert_pixeldrain_to_direct(pxl_js_match.group(1))
             return convert_pixeldrain_to_direct(pxl_btn.get('href'))
+        
         all_r2_links = REGEX_R2.findall(gen_html)
         if all_r2_links:
             for link in all_r2_links:
                 if 'X-Amz-Expires=28800' in link: return link
             return all_r2_links[0]
         return None
-    except Exception: pass
+    except Exception as e: logger.error(f"HubCloud Processing Error: {e}")
     return None
 
 # ================= SEARCH & SAVED =================
@@ -255,30 +263,28 @@ def typesense_search(query):
     today = date.today().isoformat()
     api_url = "https://search.pingora.fyi/collections/post/documents/search"
     params = {"q": query, "query_by": "post_title,category,stars,director,imdb_id", "query_by_weights": "4,2,2,2,4", "sort_by": "_text_match:desc,sort_by_date:desc", "per_page": 50, "highlight_fields": "none", "use_cache": "true", "page": 1, "analytics_tag": today}
-    for client in (api_session, session):
-        try:
-            resp = client.get(api_url, params=params, timeout=10)
-            if resp.status_code == 200:
-                hits = resp.json().get("hits", [])
-                results = [{"title": h["document"]["post_title"], "url": fix_movie_url(h["document"]["permalink"])} for h in hits if "document" in h]
-                if results: return results
-        except Exception: pass
+    try:
+        resp = session.get(api_url, params=params, timeout=10)
+        if resp.status_code == 200:
+            hits = resp.json().get("hits", [])
+            results = [{"title": h["document"]["post_title"], "url": fix_movie_url(h["document"]["permalink"])} for h in hits if "document" in h]
+            if results: return results
+    except Exception: pass
     return []
 
 def wp_search(query):
     wp_url = f"{BASE_URL}/wp-json/wp/v2/search"
-    for client in (api_session, session):
-        try:
-            resp = client.get(wp_url, params={"search": query, "per_page": 50}, timeout=10)
-            if resp.status_code == 200:
-                results = []
-                for item in resp.json():
-                    title = item.get("title", {})
-                    t_text = title.get("rendered", "") if isinstance(title, dict) else title
-                    url = item.get("url", "")
-                    if t_text and url: results.append({"title": t_text, "url": fix_movie_url(url)})
-                if results: return results
-        except Exception: pass
+    try:
+        resp = session.get(wp_url, params={"search": query, "per_page": 50}, timeout=10)
+        if resp.status_code == 200:
+            results = []
+            for item in resp.json():
+                title = item.get("title", {})
+                t_text = title.get("rendered", "") if isinstance(title, dict) else title
+                url = item.get("url", "")
+                if t_text and url: results.append({"title": t_text, "url": fix_movie_url(url)})
+            if results: return results
+    except Exception: pass
     return []
 
 # ================= FLASK ROUTES =================
@@ -312,6 +318,7 @@ def manual_links():
 
 @app.route("/play_direct")
 def play_direct():
+    """ BROWSER ROUTE: Returns a Viewer Page for PixelDrain so user can download/watch in browser. """
     encoded_url = request.args.get("url")
     target_url = safe_b64decode(encoded_url)
     if not target_url: return "Invalid URL", 400
@@ -319,21 +326,16 @@ def play_direct():
         if "greenmotors" in target_url or "gadgetsweb" in target_url: hubcloud = extract_hubcloud_from_gadgets(target_url)
         elif "hubdrive.blog" in target_url: hubcloud = extract_hubcloud_from_hubdrive(target_url)
         else: hubcloud = target_url
+        
         if hubcloud:
             if "hubdrive.blog" in hubcloud: hubcloud = extract_hubcloud_from_hubdrive(hubcloud)
             final_link = process_hubcloud(hubcloud)
-            if final_link and is_safe_url(final_link):
-                # ================= HOTLINK BYPASS RESTORED =================
-                if "cdn.pixeldrain.eu.cc/" in final_link:
-                    try:
-                        # PixelDrain direct API links give hotlink error. 
-                        # We convert /api/file/ to /u/ (viewer page) to bypass it.
-                        r = session.get(final_link, allow_redirects=False, timeout=10)
-                        loc = r.headers.get("Location", "")
-                        if "/api/file/" in loc: 
-                            return redirect(loc.replace("/api/file/", "/u/"), code=302)
-                    except Exception: pass
-                # ==========================================================
+            if final_link:
+                # For Browser: Ensure PixelDrain uses /u/ format for the viewer page
+                if "pixeldrain" in final_link:
+                    match = REGEX_PIXELDRAIN.search(final_link)
+                    if match:
+                        return redirect(f"https://pixeldrain.com/u/{match.group(1)}", code=302)
                 return redirect(final_link, code=302)
         return "Failed to extract link", 500
     except Exception: return "Error during extraction", 500
@@ -393,6 +395,7 @@ def get_playlist():
 
 @app.route('/play')
 def play_movie():
+    """ PLAYER ROUTE: Returns a Direct File link for PixelDrain so it plays in VLC/Tivimate. """
     encoded_url = request.args.get('url')
     movie_url = safe_b64decode(encoded_url)
     if not movie_url: return "Invalid URL", 400
@@ -405,23 +408,22 @@ def play_movie():
             if not best_link: return "No 1080p link found", 404
         
         hubcloud = None
-        if "greenmotors" in best_link or "gadgetsweb" in best_link: 
-            hubcloud = extract_hubcloud_from_gadgets(best_link)
-        elif "hubdrive.blog" in best_link: 
-            hubcloud = extract_hubcloud_from_hubdrive(best_link)
-        else: 
-            hubcloud = best_link
-            
+        if "greenmotors" in best_link or "gadgetsweb" in best_link: hubcloud = extract_hubcloud_from_gadgets(best_link)
+        elif "hubdrive.blog" in best_link: hubcloud = extract_hubcloud_from_hubdrive(best_link)
+        else: hubcloud = best_link
+        
         if hubcloud:
-            if "hubdrive.blog" in hubcloud: 
-                hubcloud = extract_hubcloud_from_hubdrive(hubcloud)
+            if "hubdrive.blog" in hubcloud: hubcloud = extract_hubcloud_from_hubdrive(hubcloud)
             final_link = process_hubcloud(hubcloud)
-            if final_link and is_safe_url(final_link): 
-                # Yahan se Hotlink Bypass remove kar diya hai taaki direct file link jaye
+            if final_link:
+                # For Player: Always convert to direct cdn.pixeldrain.eu.cc/ID format
+                if "pixeldrain" in final_link:
+                    final_link = convert_pixeldrain_to_direct(final_link)
                 return redirect(final_link, code=302)
         return "Failed to extract final link", 500
     except Exception as e: 
-        return f"Error during extraction: {e}", 500
+        logger.error(f"Play Movie Error: {e}")
+        return "Error during extraction", 500
 
 if __name__ == '__main__':
     import os
