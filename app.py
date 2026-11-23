@@ -71,8 +71,8 @@ HEADERS = {
     "Connection": "keep-alive"
 }
 
-# Exact ID extractor for any PixelDrain domain
-REGEX_PXL_ID = re.compile(r'pixeldrain\.(?:dev|com|net|eu\.cc)/(?:u|api/file|l)/([a-zA-Z0-9]+)')
+# 🟢 ROBUST REGEX: Yeh api/filesystem, api/file, u, l sabko handle karega aur sirf ID nikalega
+REGEX_PXL_ID = re.compile(r'pixeldrain\.(?:dev|com|net|eu\.cc)/(?:u/|api/file/|api/filesystem/u/|l/)?([a-zA-Z0-9]+)')
 REGEX_R2 = re.compile(r'https?://r2\.cloudflarestorage\.com/[^\s"\'<>]+')
 
 m3u_cache = {"content": None, "expiry": 0}
@@ -80,6 +80,38 @@ SAVED_DURATION = 3 * 24 * 60 * 60
 
 session = std_requests.Session()
 session.headers.update(HEADERS)
+
+# ================= 🟢 NEW BULLETPROOF CDN RESOLVER =================
+def resolve_pixeldrain_cdn(pxl_id):
+    """Exact cdnXX server nikalta hai bina kisi filesystem error ke."""
+    clean_session = std_requests.Session()
+    # Referer nahi bhej rahe taaki hotlink detect na ho
+    clean_session.headers.update({"User-Agent": UA, "Accept": "*/*"})
+    
+    # Gateway 1: eu.cc
+    try:
+        r = clean_session.head(f"https://cdn.pixeldrain.eu.cc/api/file/{pxl_id}", allow_redirects=False, timeout=10)
+        loc = r.headers.get("Location", "")
+        if loc:
+            parsed = urlsplit(loc)
+            if parsed.netloc and "cdn" in parsed.netloc and "pixeldrain" in parsed.netloc:
+                return f"https://{parsed.netloc}" # Returns: https://cdn23.pixeldrain.eu.cc
+    except Exception:
+        pass
+
+    # Gateway 2: Main API (Agar eu.cc fail ho jaye)
+    try:
+        r = clean_session.head(f"https://pixeldrain.com/api/file/{pxl_id}", allow_redirects=False, timeout=10)
+        loc = r.headers.get("Location", "")
+        if loc:
+            parsed = urlsplit(loc)
+            if parsed.netloc and "cdn" in parsed.netloc and "pixeldrain" in parsed.netloc:
+                return f"https://{parsed.netloc}"
+    except Exception:
+        pass
+        
+    # Fallback (Agar dono fail ho jayein, jo ki rare hai)
+    return "https://cdn.pixeldrain.eu.cc"
 
 # ================= SNIPER LOGIC FUNCTIONS =================
 def rot13(s):
@@ -284,7 +316,7 @@ def manual_links():
 
 @app.route("/play_direct")
 def play_direct():
-    """ BROWSER ROUTE: Gets cdnXX.pixeldrain.eu.cc/u/ID """
+    """ BROWSER ROUTE: Strictly constructs cdnXX.pixeldrain.eu.cc/u/ID """
     encoded_url = request.args.get("url")
     if not encoded_url:
         return "No URL provided", 400
@@ -314,23 +346,10 @@ def play_direct():
                     if pxl_match:
                         pxl_id = pxl_match.group(1)
                         
-                        # Default fallback to main gateway
-                        cdn_base = "https://cdn.pixeldrain.eu.cc"
+                        # 1. Exact cdnXX server resolve karo
+                        cdn_base = resolve_pixeldrain_cdn(pxl_id)
                         
-                        try:
-                            # Backend check to find exact cdnXX domain
-                            cdn_api = f"https://cdn.pixeldrain.eu.cc/api/file/{pxl_id}"
-                            r = session.get(cdn_api, allow_redirects=False, timeout=5)
-                            loc = r.headers.get("Location", "")
-                            if loc:
-                                # Extract just the domain (e.g., https://cdn23.pixeldrain.eu.cc)
-                                parsed_loc = urlsplit(loc)
-                                if parsed_loc.netloc:
-                                    cdn_base = f"{parsed_loc.scheme}://{parsed_loc.netloc}"
-                        except Exception:
-                            pass
-                            
-                        # Construct perfect URL for browser
+                        # 2. Strictly manual URL banao (No replace function)
                         viewer_on_cdn = f"{cdn_base}/u/{pxl_id}"
                         return redirect(viewer_on_cdn, code=302)
 
@@ -394,7 +413,7 @@ def get_playlist():
 
 @app.route('/play')
 def play_movie():
-    """ PLAYER ROUTE: Gets cdnXX.pixeldrain.eu.cc/api/file/ID """
+    """ PLAYER ROUTE: Strictly constructs cdnXX.pixeldrain.eu.cc/api/file/ID """
     encoded_url = request.args.get('url')
     movie_url = safe_b64decode(encoded_url)
     if not movie_url: return "Invalid URL", 400
@@ -420,22 +439,10 @@ def play_movie():
                 if pxl_match:
                     pxl_id = pxl_match.group(1)
                     
-                    # Default fallback to main gateway
-                    cdn_base = "https://cdn.pixeldrain.eu.cc"
+                    # 1. Exact cdnXX server resolve karo
+                    cdn_base = resolve_pixeldrain_cdn(pxl_id)
                     
-                    try:
-                        # Backend check to find exact cdnXX domain
-                        cdn_api = f"https://cdn.pixeldrain.eu.cc/api/file/{pxl_id}"
-                        r = session.get(cdn_api, allow_redirects=False, timeout=5)
-                        loc = r.headers.get("Location", "")
-                        if loc:
-                            parsed_loc = urlsplit(loc)
-                            if parsed_loc.netloc:
-                                cdn_base = f"{parsed_loc.scheme}://{parsed_loc.netloc}"
-                    except Exception:
-                        pass
-                        
-                    # Construct perfect URL for Player
+                    # 2. Strictly manual URL banao (No replace function)
                     api_on_cdn = f"{cdn_base}/api/file/{pxl_id}"
                     return redirect(api_on_cdn, code=302)
 
