@@ -81,19 +81,6 @@ SAVED_DURATION = 3 * 24 * 60 * 60
 session = std_requests.Session()
 session.headers.update(HEADERS)
 
-# ================= CDN RESOLVER HELPER =================
-def resolve_pixeldrain_cdn(pxl_id):
-    """Yeh function exact cdnXX.pixeldrain.eu.cc server find karta hai"""
-    cdn_gateway = f"https://cdn.pixeldrain.eu.cc/api/file/{pxl_id}"
-    try:
-        r = session.get(cdn_gateway, allow_redirects=False, timeout=10)
-        loc = r.headers.get("Location", "")
-        if "/api/file/" in loc:
-            return loc  # Returns: https://cdnXX.pixeldrain.eu.cc/api/file/ID
-    except Exception as e:
-        logger.error(f"CDN resolve error: {e}")
-    return None
-
 # ================= SNIPER LOGIC FUNCTIONS =================
 def rot13(s):
     res = []
@@ -323,19 +310,24 @@ def play_direct():
             if hubcloud:
                 final_link = process_hubcloud(hubcloud)
                 if final_link:
-                    # BROWSER LOGIC: /u/ chaiye hotlink error hatane ke liye
                     pxl_match = REGEX_PXL_ID.search(final_link)
                     if pxl_match:
                         pxl_id = pxl_match.group(1)
-                        resolved_api_link = resolve_pixeldrain_cdn(pxl_id)
                         
-                        if resolved_api_link:
-                            # https://cdnXX.../api/file/ID  ko  https://cdnXX.../u/ID  mein badla
-                            viewer_on_cdn = resolved_api_link.replace("/api/file/", "/u/")
-                            return redirect(viewer_on_cdn, code=302)
+                        # Default fallback to Gateway (Never use pixeldrain.com)
+                        viewer_on_cdn = f"https://cdn.pixeldrain.eu.cc/u/{pxl_id}"
+                        
+                        try:
+                            # Try to get exact cdnXX server
+                            cdn_api = f"https://cdn.pixeldrain.eu.cc/api/file/{pxl_id}"
+                            r = session.get(cdn_api, allow_redirects=False, timeout=5)
+                            loc = r.headers.get("Location", "")
+                            if "/api/file/" in loc:
+                                viewer_on_cdn = loc.replace("/api/file/", "/u/").split("?")[0]
+                        except Exception:
+                            pass # If fail, it will use the gateway fallback
                             
-                        # Agar CDN fail ho jaye toh fallback
-                        return redirect(f"https://pixeldrain.com/u/{pxl_id}", code=302)
+                        return redirect(viewer_on_cdn, code=302)
 
                     # FSL ya R2 link ke liye direct
                     return redirect(final_link, code=302)
@@ -419,18 +411,23 @@ def play_movie():
             final_link = process_hubcloud(hubcloud)
             
             if final_link:
-                # PLAYER LOGIC: VLC ko /api/file/ chaiye play hone ke liye
                 pxl_match = REGEX_PXL_ID.search(final_link)
                 if pxl_match:
                     pxl_id = pxl_match.group(1)
-                    resolved_api_link = resolve_pixeldrain_cdn(pxl_id)
                     
-                    if resolved_api_link:
-                        # VLC ko direct stream link de rahe hain
-                        return redirect(resolved_api_link, code=302)
+                    # Default fallback to Gateway (Never use pixeldrain.com)
+                    api_on_cdn = f"https://cdn.pixeldrain.eu.cc/api/file/{pxl_id}"
+                    
+                    try:
+                        # Try to get exact cdnXX server
+                        r = session.get(api_on_cdn, allow_redirects=False, timeout=5)
+                        loc = r.headers.get("Location", "")
+                        if "/api/file/" in loc:
+                            api_on_cdn = loc.split("?")[0]
+                    except Exception:
+                        pass # If fail, VLC will use the gateway fallback
                         
-                    # Fallback
-                    return redirect(f"https://pixeldrain.com/api/file/{pxl_id}", code=302)
+                    return redirect(api_on_cdn, code=302)
 
                 return redirect(final_link, code=302)
         return "Failed to extract final link", 500
