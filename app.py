@@ -4,7 +4,7 @@ import json
 import re
 import time
 import logging
-from urllib.parse import quote, unquote, urlsplit, urljoin, urlparse
+from urllib.parse import quote, unquote, urlsplit, urljoin
 from bs4 import BeautifulSoup
 from flask import Flask, Response, redirect, request, render_template
 import requests as std_requests
@@ -70,7 +70,8 @@ HEADERS = {
     "Connection": "keep-alive"
 }
 
-REGEX_PIXELDRAIN = re.compile(r'pixeldrain\.(?:dev|com|net|eu\.cc)/(?:u|api/file|l)/([a-zA-Z0-9]+)')
+# Regex to extract only the ID from any PixelDrain link
+REGEX_PXL_ID = re.compile(r'pixeldrain\.(?:dev|com|net|eu\.cc)/(?:u|api/file|l)/([a-zA-Z0-9]+)')
 REGEX_R2 = re.compile(r'https?://r2\.cloudflarestorage\.com/[^\s"\'<>]+')
 
 m3u_cache = {"content": None, "expiry": 0}
@@ -150,7 +151,7 @@ def extract_hubcloud_from_gadgets(url):
                         if 'hubdrive' in text or 'hubdrive' in href: hubdrive_fallback = a['href']
                     if hubdrive_fallback: return hubdrive_fallback
                 return hubcloud_url
-    except Exception as e: logger.error(f"Gadgets Error: {e}")
+    except Exception: pass
     return None
 
 def extract_hubcloud_from_hubdrive(url):
@@ -161,15 +162,8 @@ def extract_hubcloud_from_hubdrive(url):
             text = a.get_text(strip=True).lower()
             href = str(a.get('href', '')).lower()
             if 'hubcloud' in text or 'hubcloud' in href: return a['href']
-    except Exception as e: logger.error(f"Hubdrive Error: {e}")
+    except Exception: pass
     return None
-
-def convert_pixeldrain_to_direct(url):
-    if not url: return None
-    url = url.replace("&amp;", "&")
-    match = REGEX_PIXELDRAIN.search(url)
-    if match: return f"https://cdn.pixeldrain.eu.cc/{match.group(1)}"
-    return url
 
 def process_hubcloud(hubcloud_url):
     try:
@@ -194,13 +188,13 @@ def process_hubcloud(hubcloud_url):
         pxl_btn = gen_soup.find('a', id='pxl-1')
         if pxl_btn:
             pxl_js_match = re.search(r"var pxl\s*=\s*['\"]([^'\"]+)['\"]", gen_html)
-            if pxl_js_match: return convert_pixeldrain_to_direct(pxl_js_match.group(1))
-            return convert_pixeldrain_to_direct(pxl_btn.get('href'))
+            if pxl_js_match: return pxl_js_match.group(1)
+            return pxl_btn.get('href')
         
         all_r2_links = REGEX_R2.findall(gen_html)
         if all_r2_links: return all_r2_links[0]
         return None
-    except Exception as e: logger.error(f"HubCloud Error: {e}")
+    except Exception: pass
     return None
 
 # ================= SEARCH & SAVED =================
@@ -272,7 +266,6 @@ def search():
 
 @app.route('/manual')
 def manual_links():
-    """ RESTORED ROUTE: Handles 'Get Links' from search results. """
     encoded_url = request.args.get('url')
     title = unquote(request.args.get('title', 'Movie Links'))
     movie_url = safe_b64decode(encoded_url)
@@ -287,6 +280,7 @@ def manual_links():
 
 @app.route("/play_direct")
 def play_direct():
+    """ BROWSER ROUTE: Redirects to API link for download. """
     encoded_url = request.args.get("url")
     target_url = safe_b64decode(encoded_url)
     if not target_url: return "Invalid URL", 400
@@ -299,8 +293,8 @@ def play_direct():
             final_link = process_hubcloud(hubcloud)
             if final_link:
                 if "pixeldrain" in final_link:
-                    match = REGEX_PIXELDRAIN.search(final_link)
-                    if match: return redirect(f"https://pixeldrain.com/u/{match.group(1)}", code=302)
+                    match = REGEX_PXL_ID.search(final_link)
+                    if match: return redirect(f"https://cdn19.pixeldrain.eu.cc/api/file/{match.group(1)}", code=302)
                 return redirect(final_link, code=302)
         return "Failed to extract link", 500
     except Exception: return "Error", 500
@@ -358,6 +352,7 @@ def get_playlist():
 
 @app.route('/play')
 def play_movie():
+    """ PLAYER ROUTE: Redirects to CDN link for smooth playback. """
     encoded_url = request.args.get('url')
     movie_url = safe_b64decode(encoded_url)
     if not movie_url: return "Invalid URL", 400
@@ -379,7 +374,8 @@ def play_movie():
             final_link = process_hubcloud(hubcloud)
             if final_link:
                 if "pixeldrain" in final_link:
-                    final_link = convert_pixeldrain_to_direct(final_link)
+                    match = REGEX_PXL_ID.search(final_link)
+                    if match: return redirect(f"https://cdn.pixeldrain.eu.cc/{match.group(1)}", code=302)
                 return redirect(final_link, code=302)
         return "Failed to extract final link", 500
     except Exception as e: 
