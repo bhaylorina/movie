@@ -388,18 +388,28 @@ def get_playlist():
                     resp = session.get(f"{BASE_URL}/category/{cat_url}/page/{page}/", timeout=15)
                     if resp.status_code != 200: continue
                     soup = BeautifulSoup(resp.text, 'lxml')
-                    for a in soup.find_all('a', href=True):
-                        t, h = a.get_text(strip=True), a['href']
+                    
+                    # Fix: Find only movie cards (class="thumb") to avoid junk links
+                    movie_cards = soup.find_all('li', class_='thumb')
+                    for card in movie_cards:
+                        a_tag = card.find('a', href=True)
+                        img_tag = card.find('img', class_='nx-poster')
+                        
+                        if not a_tag: continue
+                        
+                        t = a_tag.get_text(strip=True)
+                        h = a_tag['href']
+                        logo = img_tag['src'] if img_tag and img_tag.get('src') else ""
+                        
                         if not t or len(t) < 10: continue
                         
-                        # Convert relative URL to absolute URL
                         full_url = urljoin(BASE_URL, h)
-                        
                         if full_url in seen_urls: continue
                         if any(kw in t.lower() for kw in ["season", "ep-", "episode", "series"]): continue
                         
                         seen_urls.add(full_url)
-                        m3u_temp += f'#EXTINF:-1 group-title="{cat_name}",{t}\nhttps://{request.host}/play?url={safe_b64encode(full_url)}\n'
+                        # Added tvg-logo for posters
+                        m3u_temp += f'#EXTINF:-1 tvg-logo="{logo}" group-title="{cat_name}",{t}\nhttps://{request.host}/play?url={safe_b64encode(full_url)}\n'
                 except Exception: pass
         m3u_cache["content"], m3u_cache["expiry"] = m3u_temp, now + 3600
         categories_m3u = m3u_temp
