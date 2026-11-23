@@ -79,9 +79,6 @@ BASE_URL = "https://new15.hdhub4u.cl"
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
 REGEX_PIXELDRAIN = re.compile(r'pixeldrain\.(?:dev|com)/u/([a-zA-Z0-9]+)')
-REGEX_R2 = re.compile(r'https?://[a-zA-Z0-9._-]+\.r2\.cloudflarestorage\.com/[^\s"\'<>]+')
-REGEX_BASE64_ATOB = re.compile(r"atob\(['\"]([^'\"]+)['\"]\)")
-REGEX_BASE64_LONG = re.compile(r'[a-zA-Z0-9+/]{20,}={0,2}')
 REGEX_GAME_DRIVE = re.compile(r'https?://(?:pixeldra\.in|pixeldrain\.com|pixeldrain\.net|pixeldrain\.dev)/(?:u|api/file|l)/([^?\s]+)')
 
 m3u_cache = {"content": None, "expiry": 0}
@@ -94,7 +91,7 @@ session.headers.update({'User-Agent': UA})
 api_session = std_requests.Session()
 api_session.headers.update({"User-Agent": UA, "Origin": BASE_URL, "Referer": BASE_URL + "/"})
 
-# ================= LOGIC FUNCTIONS =================
+# ================= SNIPER LOGIC FUNCTIONS =================
 def rot13(s):
     res = []
     for char in s:
@@ -117,19 +114,26 @@ def decrypt_token(token):
     return None
 
 def get_best_link(movie_soup, base_url):
+    """SNIPER MODE: Targets only h3 and h4 tags where download links reside."""
     candidates = []
-    for a_tag in movie_soup.find_all('a', href=True):
+    for tag in movie_soup.find_all(['h3', 'h4']):
+        a_tag = tag.find('a', href=True)
+        if not a_tag: continue
+        
         text = a_tag.get_text(strip=True)
         if "1080p" in text:
             href = a_tag['href']
             if not href.startswith('http'): href = urljoin(base_url, href)
+            
             size_match = re.search(r'(\d+(?:\.\d+)?)\s*(GB|MB)', text, re.I)
             size_gb = 0.0
             if size_match:
                 val = float(size_match.group(1))
                 unit = size_match.group(2).upper()
                 size_gb = val / 1024 if unit == 'MB' else val
+            
             if size_gb > 0: candidates.append({'href': href, 'text': text, 'size': size_gb})
+    
     if not candidates: return None
     def sort_key(c):
         if 2.0 <= c['size'] <= 6.0: return 1
@@ -165,7 +169,6 @@ def extract_hubcloud_from_gadgets(url):
                         if 'hubcloud' in text or 'hubcloud' in href: return a['href']
                         if 'hubdrive' in text or 'hubdrive' in href: hubdrive_fallback = a['href']
                     if hubdrive_fallback: return hubdrive_fallback
-                    return None
                 return hubcloud_url
     except Exception: pass
     return None
@@ -189,58 +192,55 @@ def convert_pixeldrain_to_direct(url):
     return url
 
 def process_hubcloud(hubcloud_url):
+    """SNIPER MODE: Uses IDs and JS extraction to avoid 'andhera' and fake links."""
     try:
         resp = session.get(hubcloud_url, timeout=15)
-        soup = BeautifulSoup(resp.text, 'lxml')
+        html_text = resp.text
+        soup = BeautifulSoup(html_text, 'lxml')
+        
+        # 1. Target Generate Button
         gen_btn = soup.find('a', id='download')
         if not gen_btn:
             for a in soup.find_all('a'):
-                text = a.get_text(strip=True).lower()
-                if 'generate' in text and 'download' in text:
+                if 'generate' in a.get_text().lower() and 'download' in a.get_text().lower():
                     gen_btn = a
                     break
+        
         if not gen_btn or not gen_btn.get('href'): return None
+        
         gen_url = urljoin(hubcloud_url, gen_btn['href'])
         gen_resp = session.get(gen_url, timeout=15)
-        html_text = gen_resp.text.replace('&amp;', '&').replace('\\u0026', '&').replace('\u0026', '&')
-        gen_soup = BeautifulSoup(html_text, 'lxml')
-        for a in gen_soup.find_all('a'):
-            text = a.get_text(strip=True).lower()
-            href = a.get('href', '')
-            if 'fsl server' in text and 'fslv2' not in text:
-                if href and 'http' in href: return href
-        all_r2_links = REGEX_R2.findall(html_text)
-        valid_r2_links = [l for l in all_r2_links if 't3apac' not in l.lower() and 'fslv2' not in l.lower()]
-        if valid_r2_links:
-            for link in valid_r2_links:
+        gen_html = gen_resp.text
+        gen_soup = BeautifulSoup(gen_html, 'lxml')
+        
+        # --- START SNIPER EXTRACTION ---
+        
+        # Priority 1: S3 / FSLv2 Server (The best link)
+        s3_btn = gen_soup.find('a', id='s3')
+        if s3_btn and s3_btn.get('href'):
+            return s3_btn['href']
+        
+        # Priority 2: FSL Server
+        fsl_btn = gen_soup.find('a', id='fsl')
+        if fsl_btn and fsl_btn.get('href'):
+            return fsl_btn['href']
+            
+        # Priority 3: PixelDrain (Handling the JS Trick)
+        pxl_btn = gen_soup.find('a', id='pxl-1')
+        if pxl_btn:
+            # Search for 'var pxl = "..."' in script tags to avoid fake 'negn6f' links
+            pxl_js_match = re.search(r"var pxl\s*=\s*['\"]([^'\"]+)['\"]", gen_html)
+            if pxl_js_match:
+                return convert_pixeldrain_to_direct(pxl_js_match.group(1))
+            return convert_pixeldrain_to_direct(pxl_btn.get('href'))
+            
+        # Priority 4: Fallback to Regex (just in case structure changes)
+        all_r2_links = REGEX_R2.findall(gen_html)
+        if all_r2_links:
+            for link in all_r2_links:
                 if 'X-Amz-Expires=28800' in link: return link
-            return valid_r2_links[0]
-        found_links = set()
-        for match in REGEX_PIXELDRAIN.finditer(html_text): found_links.add(match.group(1))
-        for a in gen_soup.find_all('a'):
-            for attr in ['data-url', 'data-link', 'data-href', 'data-src']:
-                val = a.get(attr)
-                if val:
-                    for m in REGEX_PIXELDRAIN.finditer(val): found_links.add(m.group(1))
-        for match in REGEX_BASE64_LONG.finditer(html_text):
-            decoded = safe_b64decode(match.group(0))
-            if decoded:
-                for m in REGEX_PIXELDRAIN.finditer(decoded): found_links.add(m.group(1))
-        for match in REGEX_BASE64_ATOB.finditer(html_text):
-            decoded = safe_b64decode(match.group(1))
-            if decoded:
-                for m in REGEX_PIXELDRAIN.finditer(decoded): found_links.add(m.group(1))
-        parsed_url = urllib.parse.urlparse(gen_url)
-        query_params = urllib.parse.parse_qs(parsed_url.query)
-        for key, values in query_params.items():
-            for val in values:
-                decoded = safe_b64decode(val)
-                if decoded:
-                    for m in REGEX_PIXELDRAIN.finditer(decoded): found_links.add(m.group(1))
-                for m in REGEX_PIXELDRAIN.finditer(val): found_links.add(m.group(1))
-        real_ids = [id for id in found_links if id != 'negn6f']
-        if real_ids: return convert_pixeldrain_to_direct(f"https://pixeldrain.dev/u/{real_ids[0]}")
-        elif found_links: return convert_pixeldrain_to_direct(f"https://pixeldrain.dev/u/{list(found_links)[0]}")
+            return all_r2_links[0]
+            
         return None
     except Exception: pass
     return None
@@ -345,12 +345,6 @@ def play_direct():
             if "hubdrive.blog" in hubcloud: hubcloud = extract_hubcloud_from_hubdrive(hubcloud)
             final_link = process_hubcloud(hubcloud)
             if final_link and is_safe_url(final_link):
-                if "cdn.pixeldrain.eu.cc/" in final_link:
-                    try:
-                        r = session.get(final_link, allow_redirects=False, timeout=10)
-                        loc = r.headers.get("Location", "")
-                        if "/api/file/" in loc: return redirect(loc.replace("/api/file/", "/u/"), code=302)
-                    except Exception: pass
                 return redirect(final_link, code=302)
         return "Failed to extract link", 500
     except Exception: return "Error during extraction", 500
@@ -388,27 +382,18 @@ def get_playlist():
                     resp = session.get(f"{BASE_URL}/category/{cat_url}/page/{page}/", timeout=15)
                     if resp.status_code != 200: continue
                     soup = BeautifulSoup(resp.text, 'lxml')
-                    
-                    # Fix: Find only movie cards (class="thumb") to avoid junk links
                     movie_cards = soup.find_all('li', class_='thumb')
                     for card in movie_cards:
                         a_tag = card.find('a', href=True)
                         img_tag = card.find('img', class_='nx-poster')
-                        
                         if not a_tag: continue
-                        
-                        t = a_tag.get_text(strip=True)
-                        h = a_tag['href']
+                        t, h = a_tag.get_text(strip=True), a_tag['href']
                         logo = img_tag['src'] if img_tag and img_tag.get('src') else ""
-                        
                         if not t or len(t) < 10: continue
-                        
                         full_url = urljoin(BASE_URL, h)
                         if full_url in seen_urls: continue
                         if any(kw in t.lower() for kw in ["season", "ep-", "episode", "series"]): continue
-                        
                         seen_urls.add(full_url)
-                        # Added tvg-logo for posters
                         m3u_temp += f'#EXTINF:-1 tvg-logo="{logo}" group-title="{cat_name}",{t}\nhttps://{request.host}/play?url={safe_b64encode(full_url)}\n'
                 except Exception: pass
         m3u_cache["content"], m3u_cache["expiry"] = m3u_temp, now + 3600
