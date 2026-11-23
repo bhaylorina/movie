@@ -70,12 +70,14 @@ HEADERS = {
     "Connection": "keep-alive"
 }
 
-# Regex to extract only the ID from any PixelDrain link
 REGEX_PXL_ID = re.compile(r'pixeldrain\.(?:dev|com|net|eu\.cc)/(?:u|api/file|l)/([a-zA-Z0-9]+)')
 REGEX_R2 = re.compile(r'https?://r2\.cloudflarestorage\.com/[^\s"\'<>]+')
 
 m3u_cache = {"content": None, "expiry": 0}
 SAVED_DURATION = 3 * 24 * 60 * 60 
+
+session = std_requests.Session()
+session.headers.update(HEADERS)
 
 # ================= SNIPER LOGIC FUNCTIONS =================
 def rot13(s):
@@ -135,13 +137,13 @@ def get_all_links(movie_soup):
 
 def extract_hubcloud_from_gadgets(url):
     try:
-        resp = std_requests.get(url, headers=HEADERS, timeout=15)
+        resp = session.get(url, timeout=15)
         token_match = re.search(r"s\('o','([^']+)'", resp.text)
         if token_match:
             hubcloud_url = decrypt_token(token_match.group(1))
             if hubcloud_url:
                 if "hblinks" in hubcloud_url:
-                    hb_resp = std_requests.get(hubcloud_url, headers=HEADERS, timeout=15)
+                    hb_resp = session.get(hubcloud_url, timeout=15)
                     hb_soup = BeautifulSoup(hb_resp.text, 'lxml')
                     hubdrive_fallback = None
                     for a in hb_soup.find_all('a'):
@@ -156,7 +158,7 @@ def extract_hubcloud_from_gadgets(url):
 
 def extract_hubcloud_from_hubdrive(url):
     try:
-        resp = std_requests.get(url, headers=HEADERS, timeout=15)
+        resp = session.get(url, timeout=15)
         soup = BeautifulSoup(resp.text, 'lxml')
         for a in soup.find_all('a'):
             text = a.get_text(strip=True).lower()
@@ -167,7 +169,7 @@ def extract_hubcloud_from_hubdrive(url):
 
 def process_hubcloud(hubcloud_url):
     try:
-        resp = std_requests.get(hubcloud_url, headers=HEADERS, timeout=15)
+        resp = session.get(hubcloud_url, timeout=15)
         soup = BeautifulSoup(resp.text, 'lxml')
         gen_btn = soup.find('a', id='download')
         if not gen_btn:
@@ -177,7 +179,7 @@ def process_hubcloud(hubcloud_url):
                     break
         if not gen_btn or not gen_btn.get('href'): return None
         gen_url = urljoin(hubcloud_url, gen_btn['href'])
-        gen_resp = std_requests.get(gen_url, headers=HEADERS, timeout=15)
+        gen_resp = session.get(gen_url, timeout=15)
         gen_html = gen_resp.text
         gen_soup = BeautifulSoup(gen_html, 'lxml')
         
@@ -228,7 +230,7 @@ def typesense_search(query):
     api_url = "https://search.pingora.fyi/collections/post/documents/search"
     params = {"q": query, "query_by": "post_title,category,stars,director,imdb_id", "query_by_weights": "4,2,2,2,4", "sort_by": "_text_match:desc", "per_page": 50}
     try:
-        resp = std_requests.get(api_url, params=params, headers=HEADERS, timeout=10)
+        resp = session.get(api_url, params=params, timeout=10)
         if resp.status_code == 200:
             hits = resp.json().get("hits", [])
             return [{"title": h["document"]["post_title"], "url": fix_movie_url(h["document"]["permalink"])} for h in hits if "document" in h]
@@ -238,7 +240,7 @@ def typesense_search(query):
 def wp_search(query):
     wp_url = f"{BASE_URL}/wp-json/wp/v2/search"
     try:
-        resp = std_requests.get(wp_url, params={"search": query, "per_page": 50}, headers=HEADERS, timeout=10)
+        resp = session.get(wp_url, params={"search": query, "per_page": 50}, timeout=10)
         if resp.status_code == 200:
             results = []
             for item in resp.json():
@@ -271,7 +273,7 @@ def manual_links():
     movie_url = safe_b64decode(encoded_url)
     if not movie_url: return "Invalid URL", 400
     try:
-        resp = std_requests.get(movie_url, headers=HEADERS, timeout=15)
+        resp = session.get(movie_url, timeout=15)
         soup = BeautifulSoup(resp.text, 'lxml')
         links = get_all_links(soup)
         formatted = [{"text": l['text'], "enc_url": safe_b64encode(l['url']), "title_q": quote(f"{title} - {l['text']}", safe="")} for l in links]
@@ -280,24 +282,51 @@ def manual_links():
 
 @app.route("/play_direct")
 def play_direct():
-    """ BROWSER ROUTE: Redirects to API link for download. """
+    """ BROWSER ROUTE: Exact Dynamic CDN Resolver Logic to bypass hotlink error. """
     encoded_url = request.args.get("url")
-    target_url = safe_b64decode(encoded_url)
-    if not target_url: return "Invalid URL", 400
+    if not encoded_url:
+        return "No URL provided", 400
+
+    # Manual Padding and Decoding (Exact as provided)
+    encoded_url += "=" * ((4 - len(encoded_url) % 4) % 4)
     try:
-        if "greenmotors" in target_url or "gadgetsweb" in target_url: hubcloud = extract_hubcloud_from_gadgets(target_url)
-        elif "hubdrive.blog" in target_url: hubcloud = extract_hubcloud_from_hubdrive(target_url)
-        else: hubcloud = target_url
+        target_url = base64.urlsafe_b64decode(encoded_url.encode()).decode()
+    except Exception as e:
+        return f"Invalid URL: {e}", 400
+
+    try:
+        if "greenmotors" in target_url or "gadgetsweb" in target_url:
+            hubcloud = extract_hubcloud_from_gadgets(target_url)
+        elif "hubdrive.blog" in target_url:
+            hubcloud = extract_hubcloud_from_hubdrive(target_url)
+        else:
+            hubcloud = target_url
+
         if hubcloud:
-            if "hubdrive.blog" in hubcloud: hubcloud = extract_hubcloud_from_hubdrive(hubcloud)
-            final_link = process_hubcloud(hubcloud)
-            if final_link:
-                if "pixeldrain" in final_link:
-                    match = REGEX_PXL_ID.search(final_link)
-                    if match: return redirect(f"https://cdn19.pixeldrain.eu.cc/api/file/{match.group(1)}", code=302)
-                return redirect(final_link, code=302)
-        return "Failed to extract link", 500
-    except Exception: return "Error", 500
+            if "hubdrive.blog" in hubcloud:
+                hubcloud = extract_hubcloud_from_hubdrive(hubcloud)
+
+            if hubcloud:
+                final_link = process_hubcloud(hubcloud)
+                if final_link:
+                    # Logic: If link is from cdn.pixeldrain.eu.cc, resolve actual server to avoid hotlink
+                    if "cdn.pixeldrain.eu.cc/" in final_link:
+                        try:
+                            r = session.get(final_link, allow_redirects=False, timeout=10)
+                            loc = r.headers.get("Location", "")
+                            if "/api/file/" in loc:
+                                # Transform /api/file/ -> /u/ on the resolved server (e.g. cdn32)
+                                viewer_on_cdn = loc.replace("/api/file/", "/u/")
+                                return redirect(viewer_on_cdn, code=302)
+                        except Exception as e:
+                            logger.error(f"CDN resolve error: {e}")
+
+                    # If it's FSL or R2, redirect directly
+                    return redirect(final_link, code=302)
+
+        return "Failed to extract final link from this specific URL.", 500
+    except Exception as e:
+        return f"Error during extraction: {str(e)}", 500
 
 @app.route('/save', methods=['POST'])
 def save():
@@ -328,7 +357,7 @@ def get_playlist():
         for cat_url, cat_name in categories:
             for page in range(1, 5):
                 try:
-                    resp = std_requests.get(f"{BASE_URL}/category/{cat_url}/page/{page}/", headers=HEADERS, timeout=10)
+                    resp = session.get(f"{BASE_URL}/category/{cat_url}/page/{page}/", timeout=10)
                     if resp.status_code != 200: continue
                     soup = BeautifulSoup(resp.text, 'lxml')
                     movie_cards = soup.find_all('li', class_='thumb')
@@ -352,7 +381,7 @@ def get_playlist():
 
 @app.route('/play')
 def play_movie():
-    """ PLAYER ROUTE: Redirects to CDN link for smooth playback. """
+    """ PLAYER ROUTE: Direct file link for VLC/Tivimate. """
     encoded_url = request.args.get('url')
     movie_url = safe_b64decode(encoded_url)
     if not movie_url: return "Invalid URL", 400
@@ -360,7 +389,7 @@ def play_movie():
         if any(domain in movie_url for domain in ["greenmotors", "gadgetsweb", "hubdrive", "hubcdn", "hubcloud"]): 
             best_link = movie_url
         else:
-            movie_resp = std_requests.get(movie_url, headers=HEADERS, timeout=15)
+            movie_resp = session.get(movie_url, timeout=15)
             best_link = get_best_link(BeautifulSoup(movie_resp.text, 'lxml'), movie_url)
             if not best_link: return "No 1080p link found", 404
         
