@@ -5,7 +5,6 @@ import hashlib
 import json
 import logging
 import re
-import cloudscraper
 import time
 from urllib.parse import quote, unquote, urljoin, urlparse, urlsplit, urlunparse
 import html as html_mod
