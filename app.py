@@ -1,5 +1,6 @@
 import base64
 import codecs
+import html  # ⚡ Added for unescaping URLs
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 import json
@@ -447,6 +448,15 @@ def wp_search(query):
 
 
 # ================= FLASK ROUTES =================
+
+# ⚡ HELPER: Forces an empty 302 redirect so ExoPlayer/IPTV doesn't crash on chunked encoding
+def clean_and_redirect(url):
+    clean_url = html.unescape(url.strip().replace("\\/", "/"))
+    resp = Response(status=302)
+    resp.headers["Location"] = clean_url
+    resp.headers["Content-Length"] = "0"
+    return resp
+
 @app.route("/")
 def home():
     saved_list = [
@@ -515,11 +525,11 @@ def play_direct():
                     loc = r.headers.get("Location", "")
                     if "/api/file/" in loc:
                         viewer_on_cdn = loc.replace("/api/file/", "/u/")
-                        return redirect(viewer_on_cdn, code=302)
+                        return clean_and_redirect(viewer_on_cdn) # ⚡ Uses fix
                 except Exception as e:
                     logger.error(f"CDN resolve error: {e}")
 
-            return redirect(final_link, code=302)
+            return clean_and_redirect(final_link) # ⚡ Uses fix
         return "Failed to extract final link from this specific URL.", 500
     except Exception as e:
         import traceback
@@ -657,7 +667,7 @@ def play_movie():
 
         final_link = resolve_final_link(best_link)
         if final_link:
-            return redirect(final_link, code=302)
+            return clean_and_redirect(final_link) # ⚡ Uses fix
         return "Failed to extract final link", 500
     except Exception as e:
         logger.error(f"Play Error: {e}")
