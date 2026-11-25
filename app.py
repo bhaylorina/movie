@@ -431,59 +431,67 @@ def choose_flix_quality_link(page_html, page_url):
     raise RuntimeError("No 1080p/720p download link found on movie page")
 
 def unlock_mobilejsr(url):
-    # Cloudscraper ka use karke Render par Cloudflare bypass karenge
-    # Yeh requests.Session() ki tarah hi kaam karta hai aur cookies save rakhta hai
-    scraper = cloudscraper.create_scraper(
-        browser={'browser': 'chrome', 'platform': 'windows', 'mobile': False}
-    )
+    # 1. Standard requests Session use karenge
+    local_session = std_requests.Session()
     
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
         "Referer": url,
         "Origin": "https://mobilejsr.com",
     }
-    
-    # 1. GET Request (Session & Cookies save honge scraper mein)
-    response = scraper.get(url, headers=headers, timeout=30)
-    
-    if response.status_code == 403:
-        raise RuntimeError("Blocked by Cloudflare (403 Forbidden). Render ka IP block ho gaya hai, cloudscraper bhi fail ho gaya.")
-    if response.status_code >= 400:
-        raise RuntimeError(f"mobilejsr HTTP {response.status_code}")
-        
-    # 2. CSRF Token nikalein
-    soup = BeautifulSoup(response.text, "html.parser")
-    csrf_input = soup.find("input", {"name": "_csrf"})
-    
-    if not csrf_input:
-        raise RuntimeError("Error: Could not find _csrf token on mobilejsr page.")
-        
-    csrf_token = csrf_input.get("value")
-    payload = {"_csrf": csrf_token}
-    
-    # 3. POST Request (Cookies ke sath unlock karein)
-    post_response = scraper.post(url, data=payload, headers=headers, timeout=30)
-    
-    if post_response.status_code >= 400:
-        raise RuntimeError(f"mobilejsr unlock HTTP {post_response.status_code}")
-        
-    # 4. Unlocked links extract karein
-    unlocked_soup = BeautifulSoup(post_response.text, "html.parser")
-    links = []
-    
-    container = unlocked_soup.find("section", class_="content-wrapper")
-    if container:
-        for a_tag in container.find_all("a", href=True):
-            link = a_tag["href"]
-            if link.startswith("http") and "is.gd" not in link and "dmus.in" not in link:
-                links.append(link)
-                
-    links = list(dict.fromkeys(links))
-    if not links:
-        raise RuntimeError("No unlocked links found after POST")
-        
-    return links
 
+    # 2. Aapka working SOCKS5 Proxy (socks5h ka use karein taaki DNS bhi proxy se resolve ho)
+    proxies = {
+        "http": "socks5h://82.180.146.251:10800",
+        "https": "socks5h://82.180.146.251:10800"
+    }
+
+    try:
+        # 3. GET Request proxy ke zariye bhejein
+        response = local_session.get(url, headers=headers, proxies=proxies, timeout=30, allow_redirects=True)
+
+        if response.status_code == 403:
+            raise RuntimeError("Blocked by Cloudflare (403 Forbidden). Proxy block ho gaya lagta hai.")
+        if response.status_code >= 400:
+            raise RuntimeError(f"mobilejsr HTTP {response.status_code}")
+
+        # 4. CSRF Token nikalein
+        soup = BeautifulSoup(response.text, "html.parser")
+        csrf_input = soup.find("input", {"name": "_csrf"})
+
+        if not csrf_input:
+            raise RuntimeError("Error: Could not find _csrf token on mobilejsr page.")
+
+        csrf_token = csrf_input.get("value")
+        payload = {"_csrf": csrf_token}
+
+        # 5. POST Request proxy ke zariye bhejein (Session cookies save rakhega)
+        post_response = local_session.post(url, data=payload, headers=headers, proxies=proxies, timeout=30, allow_redirects=True)
+
+        if post_response.status_code >= 400:
+            raise RuntimeError(f"mobilejsr unlock HTTP {post_response.status_code}")
+
+        # 6. Unlocked links extract karein
+        unlocked_soup = BeautifulSoup(post_response.text, "html.parser")
+        links = []
+        
+        container = unlocked_soup.find("section", class_="content-wrapper")
+        if container:
+            for a_tag in container.find_all("a", href=True):
+                link = a_tag["href"]
+                if link.startswith("http") and "is.gd" not in link and "dmus.in" not in link:
+                    links.append(link)
+
+        links = list(dict.fromkeys(links))
+        if not links:
+            raise RuntimeError("No unlocked links found after POST")
+
+        return links
+        
+    except std_requests.exceptions.ProxyError:
+        raise RuntimeError("Proxy Server Down hai ya connect nahi ho pa raha.")
+    except std_requests.exceptions.Timeout:
+        raise RuntimeError("Proxy request timeout ho gayi.")
 def pick_hubcloud_link(links):
     for link in links:
         if "hubcloud" in link.lower(): return link
