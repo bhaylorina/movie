@@ -5,6 +5,7 @@ import hashlib
 import json
 import logging
 import re
+import cloudscraper
 import time
 from urllib.parse import quote, unquote, urljoin, urlparse, urlsplit, urlunparse
 import html as html_mod
@@ -430,27 +431,57 @@ def choose_flix_quality_link(page_html, page_url):
     raise RuntimeError("No 1080p/720p download link found on movie page")
 
 def unlock_mobilejsr(url):
-    local_session = std_requests.Session()
-    headers = {"User-Agent": UA, "Referer": url, "Origin": "https://mobilejsr.com"}
-    response = local_session.get(url, headers=headers, timeout=30, allow_redirects=True)
-    if response.status_code == 403: raise RuntimeError("Blocked by Cloudflare (403 Forbidden).")
-    if response.status_code >= 400: raise RuntimeError(f"mobilejsr HTTP {response.status_code}")
+    # Cloudscraper ka use karke Render par Cloudflare bypass karenge
+    # Yeh requests.Session() ki tarah hi kaam karta hai aur cookies save rakhta hai
+    scraper = cloudscraper.create_scraper(
+        browser={'browser': 'chrome', 'platform': 'windows', 'mobile': False}
+    )
+    
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "Referer": url,
+        "Origin": "https://mobilejsr.com",
+    }
+    
+    # 1. GET Request (Session & Cookies save honge scraper mein)
+    response = scraper.get(url, headers=headers, timeout=30)
+    
+    if response.status_code == 403:
+        raise RuntimeError("Blocked by Cloudflare (403 Forbidden). Render ka IP block ho gaya hai, cloudscraper bhi fail ho gaya.")
+    if response.status_code >= 400:
+        raise RuntimeError(f"mobilejsr HTTP {response.status_code}")
+        
+    # 2. CSRF Token nikalein
     soup = BeautifulSoup(response.text, "html.parser")
     csrf_input = soup.find("input", {"name": "_csrf"})
-    if not csrf_input: raise RuntimeError("Error: Could not find _csrf token on mobilejsr page.")
-    payload = {"_csrf": csrf_input.get("value")}
-    post_response = local_session.post(url, data=payload, headers=headers, timeout=30, allow_redirects=True)
-    if post_response.status_code >= 400: raise RuntimeError(f"mobilejsr unlock HTTP {post_response.status_code}")
+    
+    if not csrf_input:
+        raise RuntimeError("Error: Could not find _csrf token on mobilejsr page.")
+        
+    csrf_token = csrf_input.get("value")
+    payload = {"_csrf": csrf_token}
+    
+    # 3. POST Request (Cookies ke sath unlock karein)
+    post_response = scraper.post(url, data=payload, headers=headers, timeout=30)
+    
+    if post_response.status_code >= 400:
+        raise RuntimeError(f"mobilejsr unlock HTTP {post_response.status_code}")
+        
+    # 4. Unlocked links extract karein
     unlocked_soup = BeautifulSoup(post_response.text, "html.parser")
     links = []
+    
     container = unlocked_soup.find("section", class_="content-wrapper")
     if container:
         for a_tag in container.find_all("a", href=True):
             link = a_tag["href"]
             if link.startswith("http") and "is.gd" not in link and "dmus.in" not in link:
                 links.append(link)
+                
     links = list(dict.fromkeys(links))
-    if not links: raise RuntimeError("No unlocked links found after POST")
+    if not links:
+        raise RuntimeError("No unlocked links found after POST")
+        
     return links
 
 def pick_hubcloud_link(links):
